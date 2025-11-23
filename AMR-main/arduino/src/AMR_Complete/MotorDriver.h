@@ -33,23 +33,32 @@ private:
     unsigned long lastPIDMillis = 0;
     unsigned int pidIntervalMs = 50; // PID update interval (ms)
 
-    // Target speed (pulses per second) - único valor para ambos motores
-    float targetPps = 0.0f;
-    float appliedPps = 0.0f;  // Setpoint con rampa aplicada
+    // Target speed (pulses per second) - ahora por motor
+    float targetPpsLeft = 0.0f;
+    float targetPpsRight = 0.0f;
+    float appliedPpsLeft = 0.0f;  // Setpoint con rampa aplicada (izq)
+    float appliedPpsRight = 0.0f; // Setpoint con rampa aplicada (der)
 
-    // PID state - un solo controlador para ambos motores
-    float Kp = 0.08f; // initial guess, tune on hardware
-    float Ki = 0.02f;
-    float Kd = 0.002f;
-    float integral = 0.0f;
-    float prevError = 0.0f;
-    float integralClamp = 500.0f; // anti-windup
+    // PID state - controlador por motor (izq/der)
+    float KpL = 0.08f; // left motor gains
+    float KiL = 0.02f;
+    float KdL = 0.002f;
+    float integralL = 0.0f;
+    float prevErrorL = 0.0f;
+
+    float KpR = 0.08f; // right motor gains
+    float KiR = 0.02f;
+    float KdR = 0.002f;
+    float integralR = 0.0f;
+    float prevErrorR = 0.0f;
+
+    float integralClamp = 500.0f; // anti-windup (shared)
 
     // Soft-start ramp time in ms (time to go from 0 -> target)
     unsigned long rampTimeMs = 800;
     
     // Factor de compensación para motor derecho (corrige curva a la derecha)
-    static constexpr float RIGHT_MOTOR_COMPENSATION = 1.1f;
+    static constexpr float RIGHT_MOTOR_COMPENSATION = 1.8f;
     
 public:
     void init();
@@ -75,7 +84,9 @@ public:
     bool isVelocityControlEnabled();
 
     // Set PID gains (tune on hardware)
-    void setPIDGains(float kp, float ki, float kd);
+    void setPIDGains(float kp, float ki, float kd); // sets both motors to same gains
+    void setLeftPIDGains(float kp, float ki, float kd);
+    void setRightPIDGains(float kp, float ki, float kd);
 
     // Set PID update interval
     void setPIDInterval(unsigned int ms);
@@ -84,7 +95,12 @@ public:
     void setRampTime(unsigned long ms);
 
     // Set target speed in pulses per second (encoder pulses/sec) - valor único para ambos motores
+    // Backwards-compatible: set same target for both motors
     void setTargetPulsesPerSecond(float pps);
+    // Per-motor targets
+    void setTargetPulsesPerSecondLeft(float pps);
+    void setTargetPulsesPerSecondRight(float pps);
+    void setTargetPulsesPerSecondBoth(float leftPps, float rightPps);
 
     // Must be called periodically (from main loop) with encoder deltas and dt
     // Interpola lecturas de ambos encoders y usa un solo PID

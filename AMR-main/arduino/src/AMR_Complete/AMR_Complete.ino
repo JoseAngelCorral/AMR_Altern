@@ -1,4 +1,4 @@
-/*
+    /*
  * ========================================
  *          AMR CONTROL SYSTEM
  * ========================================
@@ -863,7 +863,7 @@ void beginNextWaypoint() {
     float delta = normalizeAngle(desired - curTh);
 
     // Log información del waypoint actual
-    int effectiveCount = (count > 1) ? count - 1 : count;
+    effectiveCount = (count > 1) ? count - 1 : count;
     Serial.print(F("Waypoint "));
     Serial.print(routeExec.currentPoint + 1);
     Serial.print(F("/"));
@@ -1464,7 +1464,7 @@ void loop() {
             }
         } else if (wallFollow.state == 2) {
             // Estado: girando (esperando que termine el giro automático)
-            if (!autoTurnActive) {
+            if (!turningInProgress) {
                 // Giro completado, volver a seguir pared
                 wallFollow.state = 1;
                 Serial.println(F("Giro completado. Reanudando seguimiento."));

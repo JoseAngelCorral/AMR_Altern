@@ -208,9 +208,12 @@ void MotorDriver::enableVelocityControl(bool en) {
     velocityControlEnabled = en;
     if (!en) {
         // reset integrators and stop applying setpoints
-        integral = 0.0f;
-        prevError = 0.0f;
-        appliedPps = 0.0f;
+        integralL = 0.0f;
+        prevErrorL = 0.0f;
+        appliedPpsLeft = 0.0f;
+        integralR = 0.0f;
+        prevErrorR = 0.0f;
+        appliedPpsRight = 0.0f;
         // ensure motors are stopped or left under direct control
     } else {
         lastPIDMillis = millis();
@@ -224,15 +227,47 @@ bool MotorDriver::isVelocityControlEnabled() {
 }
 
 void MotorDriver::setTargetPulsesPerSecond(float pps) {
-    targetPps = pps;
-    // when first setting, don't instantly jump applied setpoint if off
+    // Backwards-compatible: set same target for both motors
+    targetPpsLeft = pps;
+    targetPpsRight = pps;
     if (!velocityControlEnabled) {
-        appliedPps = targetPps;
+        appliedPpsLeft = targetPpsLeft;
+        appliedPpsRight = targetPpsRight;
+    }
+}
+
+void MotorDriver::setTargetPulsesPerSecondLeft(float pps) {
+    targetPpsLeft = pps;
+    if (!velocityControlEnabled) appliedPpsLeft = targetPpsLeft;
+}
+
+void MotorDriver::setTargetPulsesPerSecondRight(float pps) {
+    targetPpsRight = pps;
+    if (!velocityControlEnabled) appliedPpsRight = targetPpsRight;
+}
+
+void MotorDriver::setTargetPulsesPerSecondBoth(float leftPps, float rightPps) {
+    targetPpsLeft = leftPps;
+    targetPpsRight = rightPps;
+    if (!velocityControlEnabled) {
+        appliedPpsLeft = targetPpsLeft;
+        appliedPpsRight = targetPpsRight;
     }
 }
 
 void MotorDriver::setPIDGains(float kp, float ki, float kd) {
-    Kp = kp; Ki = ki; Kd = kd;
+    // set same gains for both motors
+    KpL = KpR = kp;
+    KiL = KiR = ki;
+    KdL = KdR = kd;
+}
+
+void MotorDriver::setLeftPIDGains(float kp, float ki, float kd) {
+    KpL = kp; KiL = ki; KdL = kd;
+}
+
+void MotorDriver::setRightPIDGains(float kp, float ki, float kd) {
+    KpR = kp; KiR = ki; KdR = kd;
 }
 
 void MotorDriver::setPIDInterval(unsigned int ms) {
@@ -258,50 +293,58 @@ void MotorDriver::updateVelocityControl(long leftDeltaPulses, long rightDeltaPul
 
     float dt = (float)elapsed / 1000.0f; // seconds
 
-    // INTERPOLACIÓN: Promedio de lecturas de ambos encoders para generar valor único
-    float avgDeltaPulses = ((float)leftDeltaPulses + (float)rightDeltaPulses) / 2.0f;
-    float measPps = avgDeltaPulses / dt; // Velocidad medida promedio (pulses per second)
+    // Measured pulses per second per motor
+    float measPpsL = ((float)leftDeltaPulses) / dt;
+    float measPpsR = ((float)rightDeltaPulses) / dt;
 
-    // Soft-start ramp applied setpoint towards target
+    // Soft-start ramp applied setpoint towards target (per motor)
     if (rampTimeMs > 0) {
-        float maxDelta = (abs(targetPps) / (float)rampTimeMs) * (float)elapsed; // pps per this interval
+        float maxDeltaL = (abs(targetPpsLeft) / (float)rampTimeMs) * (float)elapsed; // pps per this interval
+        float maxDeltaR = (abs(targetPpsRight) / (float)rampTimeMs) * (float)elapsed;
 
-        // adjust appliedPps towards targetPps
-        if (appliedPps < targetPps) {
-            appliedPps += maxDelta;
-            if (appliedPps > targetPps) appliedPps = targetPps;
-        } else if (appliedPps > targetPps) {
-            appliedPps -= maxDelta;
-            if (appliedPps < targetPps) appliedPps = targetPps;
+        // adjust appliedPpsLeft towards targetPpsLeft
+        if (appliedPpsLeft < targetPpsLeft) {
+            appliedPpsLeft += maxDeltaL;
+            if (appliedPpsLeft > targetPpsLeft) appliedPpsLeft = targetPpsLeft;
+        } else if (appliedPpsLeft > targetPpsLeft) {
+            appliedPpsLeft -= maxDeltaL;
+            if (appliedPpsLeft < targetPpsLeft) appliedPpsLeft = targetPpsLeft;
+        }
+
+        // adjust appliedPpsRight towards targetPpsRight
+        if (appliedPpsRight < targetPpsRight) {
+            appliedPpsRight += maxDeltaR;
+            if (appliedPpsRight > targetPpsRight) appliedPpsRight = targetPpsRight;
+        } else if (appliedPpsRight > targetPpsRight) {
+            appliedPpsRight -= maxDeltaR;
+            if (appliedPpsRight < targetPpsRight) appliedPpsRight = targetPpsRight;
         }
     } else {
-        appliedPps = targetPps;
+        appliedPpsLeft = targetPpsLeft;
+        appliedPpsRight = targetPpsRight;
     }
 
-    // PID único usando el valor interpolado
-    float error = appliedPps - measPps;
-    integral += error * dt;
-    
-    // Clamp integral (anti-windup)
-    if (integral > integralClamp) integral = integralClamp;
-    if (integral < -integralClamp) integral = -integralClamp;
-    
-    float derivative = (error - prevError) / dt;
-    prevError = error;
-    
-    // Cálculo de salida PID
-    float pidOutput = Kp * error + Ki * integral + Kd * derivative;
+    // PID per motor
+    float errorL = appliedPpsLeft - measPpsL;
+    integralL += errorL * dt;
+    if (integralL > integralClamp) integralL = integralClamp;
+    if (integralL < -integralClamp) integralL = -integralClamp;
+    float derivativeL = (errorL - prevErrorL) / dt;
+    prevErrorL = errorL;
+    float pidOutL = KpL * errorL + KiL * integralL + KdL * derivativeL;
 
-    // Map PID output to PWM command (asumiendo que los gains están ajustados)
-    int pwmBase = (int)round(pidOutput);
-    pwmBase = constrain(pwmBase, -MAX_SPEED, MAX_SPEED);
+    float errorR = appliedPpsRight - measPpsR;
+    integralR += errorR * dt;
+    if (integralR > integralClamp) integralR = integralClamp;
+    if (integralR < -integralClamp) integralR = -integralClamp;
+    float derivativeR = (errorR - prevErrorR) / dt;
+    prevErrorR = errorR;
+    float pidOutR = KpR * errorR + KiR * integralR + KdR * derivativeR;
 
-    // Aplicar PWM base al motor izquierdo
-    int pwmLeft = pwmBase;
-    
-    // Aplicar factor de compensación 1.1 al motor derecho (corrige curva a la derecha)
-    int pwmRight = (int)round((float)pwmBase * RIGHT_MOTOR_COMPENSATION);
-    pwmRight = constrain(pwmRight, -MAX_SPEED, MAX_SPEED); // Limitar para no exceder MAX_SPEED
+    int pwmLeft = (int)round(pidOutL);
+    int pwmRight = (int)round(pidOutR * RIGHT_MOTOR_COMPENSATION);
+    pwmLeft = constrain(pwmLeft, -MAX_SPEED, MAX_SPEED);
+    pwmRight = constrain(pwmRight, -MAX_SPEED, MAX_SPEED);
 
     // Aplicar PWM a ambos motores
     setBothMotors(pwmLeft, pwmRight);
