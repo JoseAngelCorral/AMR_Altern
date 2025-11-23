@@ -58,7 +58,7 @@ private:
     unsigned long rampTimeMs = 600;
     
     // Factor de compensación para motor derecho (corrige curva a la derecha)
-    static constexpr float RIGHT_MOTOR_COMPENSATION = 1.4f;
+    static constexpr float RIGHT_MOTOR_COMPENSATION = 1.8f;
     
 public:
     void init();
