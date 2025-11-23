@@ -727,8 +727,6 @@ struct WallFollow {
     int side = 0; // +1 = izquierda, -1 = derecha
     int state = 0; // 0=idle, 1=following, 2=turning, 3=stopped
     unsigned long allWallsDetectedStart = 0; // timestamp cuando se detectaron todas las paredes
-    bool routeResumePending = false; // flag para reanudar ruta después de seguimiento
-    int resumeAction = 0; // 0=none, 1=turn, 2=forward
 } wallFollow;
 
 const float WALL_FOLLOW_THRESHOLD_CM = 30.0f; // distancia para considerar pared detectada
@@ -766,8 +764,6 @@ void startWallFollowing(int side) {
     wallFollow.side = side;
     wallFollow.state = 1; // following
     wallFollow.allWallsDetectedStart = 0;
-    wallFollow.routeResumePending = false;
-    wallFollow.resumeAction = 0;
     Serial.print(F("Wall following started: "));
     Serial.println(side == 1 ? F("LEFT") : F("RIGHT"));
 }
@@ -1469,93 +1465,21 @@ void loop() {
         } else if (wallFollow.state == 2) {
             // Estado: girando (esperando que termine el giro automático)
             if (!autoTurnActive) {
-                // Giro completado
-                if (wallFollow.routeResumePending && wallFollow.resumeAction == 1) {
-                    // Este giro era para reanudar la ruta, detener seguimiento y reanudar ruta
-                    if (routeExec.active) {
-                        // Recalcular movimiento hacia el waypoint objetivo desde la posición actual
-                        float dx = routeExec.targetX - odometry.getX();
-                        float dy = routeExec.targetY - odometry.getY();
-                        float dist = sqrtf(dx*dx + dy*dy);
-                        float pulsesF = (dist / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
-                        routeExec.moveTargetPulses = (long)(pulsesF + 0.5f);
-                        routeExec.moveStartLeft = encoders.readLeft();
-                        routeExec.moveStartRight = encoders.readRight();
-                        if (routeExec.moveTargetPulses > 0) {
-                            motors.moveForward();
-                            routeExec.state = ROUTE_MOVING;
-                            Serial.print(F("Giro completado. Reanudando ejecución de ruta. Movimiento: "));
-                            Serial.print(routeExec.moveTargetPulses);
-                            Serial.println(F(" pulsos"));
-                        } else {
-                            // Ya está en el waypoint, avanzar al siguiente
-                            routeExec.currentPoint++;
-                            beginNextWaypoint();
-                        }
-                    }
-                    stopWallFollowing();
-                } else {
-                    // Giro normal durante seguimiento, volver a seguir
-                    wallFollow.state = 1;
-                    Serial.println(F("Giro completado. Reanudando seguimiento."));
-                }
+                // Giro completado, volver a seguir pared
+                wallFollow.state = 1;
+                Serial.println(F("Giro completado. Reanudando seguimiento."));
             }
         } else {
             // Estado: siguiendo pared (state == 1)
             
-            // Verificar condición de reanudación de ruta
-            // Prioridad 1: Si deja de detectar los 2 frontales Y el lateral opuesto → reanudar de frente
-            if (!frontLeftWall && !frontRightWall && !oppositeSideWall && !wallFollow.routeResumePending) {
-                wallFollow.routeResumePending = true;
-                wallFollow.resumeAction = 2; // forward
-                Serial.println(F("No hay frontales ni lateral opuesto. Reanudando ruta de frente."));
-            }
-            // Prioridad 2: Si deja de detectar los 2 frontales → reanudar de frente
-            else if (!frontLeftWall && !frontRightWall && !wallFollow.routeResumePending) {
-                wallFollow.routeResumePending = true;
-                wallFollow.resumeAction = 2; // forward
-                Serial.println(F("No hay paredes frontales. Reanudando ruta de frente."));
-            }
-            // Prioridad 3: Si deja de detectar el lateral opuesto → hacer giro (pues tendría pared al frente)
-            else if (!oppositeSideWall && !wallFollow.routeResumePending) {
-                wallFollow.routeResumePending = true;
-                wallFollow.resumeAction = 1; // turn
-                Serial.println(F("Lateral opuesto ya no detecta pared. Realizando giro para reanudar ruta (pared al frente probable)."));
-            }
-            
-            // Si hay ruta pendiente de reanudar, ejecutar acción
-            if (wallFollow.routeResumePending) {
-                if (wallFollow.resumeAction == 1) {
-                    // Realizar giro
-                    wallFollow.state = 2; // turning
-                    startAutoTurn(90.0f * wallFollow.side); // girar hacia la pared que seguíamos
-                    wallFollow.routeResumePending = false;
-                    wallFollow.resumeAction = 0;
-                } else if (wallFollow.resumeAction == 2) {
-                    // Reanudar ruta de frente
-                    if (routeExec.active) {
-                        // Recalcular movimiento hacia el waypoint objetivo desde la posición actual
-                        float dx = routeExec.targetX - odometry.getX();
-                        float dy = routeExec.targetY - odometry.getY();
-                        float dist = sqrtf(dx*dx + dy*dy);
-                        float pulsesF = (dist / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
-                        routeExec.moveTargetPulses = (long)(pulsesF + 0.5f);
-                        routeExec.moveStartLeft = encoders.readLeft();
-                        routeExec.moveStartRight = encoders.readRight();
-                        if (routeExec.moveTargetPulses > 0) {
-                            motors.moveForward();
-                            routeExec.state = ROUTE_MOVING;
-                            Serial.print(F("Reanudando ejecución de ruta. Movimiento: "));
-                            Serial.print(routeExec.moveTargetPulses);
-                            Serial.println(F(" pulsos"));
-                        } else {
-                            // Ya está en el waypoint, avanzar al siguiente
-                            routeExec.currentPoint++;
-                            beginNextWaypoint();
-                        }
-                    }
-                    stopWallFollowing();
-                }
+            // Detectar esquina externa: frontales NO detectan pared pero el lateral seguido deja de detectar
+            // En este caso, girar 90° hacia el exterior (hacia donde estaba la pared seguida) para seguirla
+            if (!frontLeftWall && !frontRightWall && !followSideWall) {
+                wallFollow.state = 2; // turning
+                motors.stop();
+                // Girar hacia el exterior (hacia la pared que seguíamos) para seguirla
+                startAutoTurn(90.0f * wallFollow.side);
+                Serial.println(F("Esquina externa detectada: lateral seguido perdió pared. Girando 90° hacia exterior para seguir pared."));
             }
             
             // Verificar si todas las paredes están detectadas
@@ -1573,34 +1497,70 @@ void loop() {
                 Serial.println(F("Pared al frente detectada. Girando..."));
             } else {
                 // Seguir la pared ajustando velocidad según distancia
+                // Control proporcional: más cerca = más lento, más lejos = más rápido
                 int baseSpeed = WALL_FOLLOW_SPEED;
                 int leftSpeed = baseSpeed;
                 int rightSpeed = baseSpeed;
                 
-                // Ajustar velocidad según distancia a la pared seguida
+                // Calcular velocidad proporcional según distancia (15-25cm es rango ideal)
+                // Muy cerca (<15cm): reducir velocidad y alejarse
+                // Rango ideal (15-25cm): velocidad base
+                // Lejos (>25cm): aumentar velocidad y acercarse
+                float speedMultiplier = 1.0f;
+                float correctionFactor = 0.0f;
+                
                 if (followSideDist < 15.0f) {
-                    // Muy cerca de la pared, alejarse ligeramente
-                    if (wallFollow.side == 1) {
-                        // Siguiendo pared izquierda, girar ligeramente a la derecha
-                        rightSpeed = baseSpeed - 20;
-                        leftSpeed = baseSpeed;
-                    } else {
-                        // Siguiendo pared derecha, girar ligeramente a la izquierda
-                        leftSpeed = baseSpeed - 20;
-                        rightSpeed = baseSpeed;
-                    }
+                    // Muy cerca: reducir velocidad proporcionalmente (mínimo 60% de base)
+                    speedMultiplier = 0.6f + (followSideDist / 15.0f) * 0.4f; // 0.6 a 1.0
+                    correctionFactor = -20.0f; // alejarse
                 } else if (followSideDist > 25.0f) {
-                    // Lejos de la pared, acercarse ligeramente
-                    if (wallFollow.side == 1) {
-                        // Siguiendo pared izquierda, girar ligeramente a la izquierda
-                        leftSpeed = baseSpeed - 20;
-                        rightSpeed = baseSpeed;
+                    // Lejos: aumentar velocidad proporcionalmente (máximo 120% de base)
+                    speedMultiplier = 1.0f + ((followSideDist - 25.0f) / 25.0f) * 0.2f; // 1.0 a 1.2
+                    if (speedMultiplier > 1.2f) speedMultiplier = 1.2f;
+                    correctionFactor = 20.0f; // acercarse
+                }
+                
+                // Aplicar velocidad base ajustada
+                int adjustedSpeed = (int)(baseSpeed * speedMultiplier);
+                if (adjustedSpeed > 255) adjustedSpeed = 255;
+                if (adjustedSpeed < 60) adjustedSpeed = 60; // velocidad mínima
+                
+                // Aplicar corrección de dirección
+                if (wallFollow.side == 1) {
+                    // Siguiendo pared izquierda
+                    if (correctionFactor < 0) {
+                        // Alejarse: girar ligeramente a la derecha
+                        rightSpeed = adjustedSpeed + (int)correctionFactor;
+                        leftSpeed = adjustedSpeed;
+                    } else if (correctionFactor > 0) {
+                        // Acercarse: girar ligeramente a la izquierda
+                        leftSpeed = adjustedSpeed + (int)correctionFactor;
+                        rightSpeed = adjustedSpeed;
                     } else {
-                        // Siguiendo pared derecha, girar ligeramente a la derecha
-                        rightSpeed = baseSpeed - 20;
-                        leftSpeed = baseSpeed;
+                        leftSpeed = adjustedSpeed;
+                        rightSpeed = adjustedSpeed;
+                    }
+                } else {
+                    // Siguiendo pared derecha
+                    if (correctionFactor < 0) {
+                        // Alejarse: girar ligeramente a la izquierda
+                        leftSpeed = adjustedSpeed + (int)correctionFactor;
+                        rightSpeed = adjustedSpeed;
+                    } else if (correctionFactor > 0) {
+                        // Acercarse: girar ligeramente a la derecha
+                        rightSpeed = adjustedSpeed + (int)correctionFactor;
+                        leftSpeed = adjustedSpeed;
+                    } else {
+                        leftSpeed = adjustedSpeed;
+                        rightSpeed = adjustedSpeed;
                     }
                 }
+                
+                // Asegurar límites PWM
+                if (leftSpeed > 255) leftSpeed = 255;
+                if (leftSpeed < 60) leftSpeed = 60;
+                if (rightSpeed > 255) rightSpeed = 255;
+                if (rightSpeed < 60) rightSpeed = 60;
                 
                 motors.setBothMotors(leftSpeed, rightSpeed);
             }
