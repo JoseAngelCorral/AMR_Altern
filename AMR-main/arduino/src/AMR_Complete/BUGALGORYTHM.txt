@@ -1,0 +1,9 @@
+// BUG algorithm removed from this project.
+// The autonomous IR-based bug avoidance implementation has been
+// intentionally removed from the `AMR_Complete` sketch per project
+// requirements. This file previously contained an experimental
+// implementation and has been retained only as a marker.
+
+// If you need to reintroduce obstacle avoidance, use a separate
+// module/file and integrate carefully with existing command
+// handling and odometry to avoid unexpected interactions.

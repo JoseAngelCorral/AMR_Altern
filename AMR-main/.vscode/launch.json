@@ -1,0 +1,28 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        
+        {
+            "name": "Arduino: Compile AMR_Complete",
+            "type": "arduino",
+            "request": "launch",
+            "command": "compile",
+            "program": "arduino/src/AMR_Complete/AMR_Complete.ino",
+            "fqbn": "arduino:renesas_uno:unor4wifi"
+        },
+        {
+            "name": "Arduino: Upload AMR_Complete",
+            "type": "arduino",
+            "request": "launch",
+            "command": "upload",
+            "program": "arduino/src/AMR_Complete/AMR_Complete.ino",
+            "fqbn": "arduino:renesas_uno:unor4wifi",
+            "port": "COM8"
+        }
+        
+
+    ]
+}

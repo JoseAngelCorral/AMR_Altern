@@ -1,0 +1,60 @@
+/*
+ * ==============================================
+ *     DIAGNÓSTICO AMR - PROBLEMAS COMUNES
+ * ==============================================
+ * 
+ * Si los motores se mueven pero no responden bien:
+ * 
+ * 1. PROBLEMA: Direcciones invertidas
+ *    SÍNTOMA: Robot va hacia atrás cuando debería ir adelante
+ *    SOLUCIÓN: Intercambiar RPWM y LPWM en MotorDriver.h
+ * 
+ * 2. PROBLEMA: Motor gira al revés
+ *    SÍNTOMA: Un motor gira en dirección opuesta
+ *    SOLUCIÓN: Intercambiar cables del motor o invertir lógica
+ * 
+ * 3. PROBLEMA: Respuesta lenta/errática
+ *    SÍNTOMA: Motores responden tarde o de forma irregular
+ *    CAUSAS: Voltaje bajo, PWM muy bajo, conexiones flojas
+ * 
+ * 4. PROBLEMA: Giros incorrectos
+ *    SÍNTOMA: Gira en dirección opuesta a la esperada
+ *    SOLUCIÓN: Verificar lógica de turnLeft/turnRight
+ * 
+ * 5. PROBLEMA: Velocidad insuficiente
+ *    SÍNTOMA: Se mueve muy lento o no supera fricción
+ *    SOLUCIÓN: Aumentar MIN_SPEED y DEFAULT_SPEED
+ */
+
+// Este archivo documenta las soluciones más comunes
+// Usar los comandos de debug para diagnosticar:
+
+// COMANDOS DE DIAGNÓSTICO:
+// T = Test automático de cada motor individualmente
+// W,A,S,D = Con debug habilitado muestran qué PWM se activa
+// H = Ayuda completa
+
+// PASOS PARA DIAGNÓSTICO:
+// 1. Envía 'T' para test automático
+// 2. Observa si cada motor gira en la dirección correcta
+// 3. Si un motor gira al revés, intercambiar cables o lógica
+// 4. Si no se mueve, verificar conexiones y voltaje
+// 5. Ajustar velocidades en MotorDriver.h si es necesario
+
+// CONFIGURACIONES COMUNES A AJUSTAR:
+
+// En MotorDriver.h - Velocidades:
+// #define DEFAULT_SPEED 170    // Subir si va muy lento  
+// #define TURN_SPEED 140       // Velocidad de giro
+// #define MIN_SPEED 100        // Mínimo para superar fricción
+
+// Si direcciones están invertidas, intercambiar estas líneas 
+// en las funciones moveForward/moveBackward:
+
+// ORIGINAL:
+// analogWrite(MOTOR_LEFT_RPWM, speed);   // Adelante
+// analogWrite(MOTOR_LEFT_LPWM, 0);       // Atrás = 0
+
+// INVERTIDO:
+// analogWrite(MOTOR_LEFT_RPWM, 0);       // Adelante = 0  
+// analogWrite(MOTOR_LEFT_LPWM, speed);   // Atrás
