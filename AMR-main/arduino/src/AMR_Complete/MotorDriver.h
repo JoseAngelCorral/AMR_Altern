@@ -55,10 +55,10 @@ private:
     float integralClamp = 500.0f; // anti-windup (shared)
 
     // Soft-start ramp time in ms (time to go from 0 -> target)
-    unsigned long rampTimeMs = 800;
+    unsigned long rampTimeMs = 600;
     
     // Factor de compensación para motor derecho (corrige curva a la derecha)
-    static constexpr float RIGHT_MOTOR_COMPENSATION = 1.8f;
+    static constexpr float RIGHT_MOTOR_COMPENSATION = 1.4f;
     
 public:
     void init();
