@@ -136,6 +136,16 @@ const char routesPageHTML[] PROGMEM = R"rawliteral(
     .controls { display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; justify-content:center; }
     .controls button { background:#222; color:#7CFC00; border:none; padding:10px 12px; margin:4px 0; font-size:16px; border-radius:6px; cursor:pointer; }
         .controls button:hover { background:#7CFC00; color:#000; }
+        
+        /* Estilos para elementos deshabilitados (preview) */
+        select:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            background: #1a1a1a !important;
+        }
+        select:disabled option {
+            color: #666;
+        }
 
         @media (max-width:520px) {
             .container { padding:6px; }
@@ -149,7 +159,7 @@ const char routesPageHTML[] PROGMEM = R"rawliteral(
     <div class="card">
     <div class="headerRow">
         <button id="backToDash" title="Volver al dashboard" onclick="location.href='/'">←</button>
-        <h2>Seleccionar ruta y waypoint</h2>
+        <h2>Control de Rutas Automáticas</h2>
     </div>
     
     <div>
@@ -158,13 +168,13 @@ const char routesPageHTML[] PROGMEM = R"rawliteral(
     </div>
 
     <div>
-        <label for="waypointSelect">Waypoints de la ruta (x,y,route):</label>
-        <select id="waypointSelect"></select>
+        <label for="waypointSelect">Waypoints de la ruta <span style="color:#888; font-size:0.85em;">(Preview - Implementación futura)</span>:</label>
+        <select id="waypointSelect" disabled style="opacity:0.6; cursor:not-allowed; background:#1a1a1a;"></select>
     </div>
 
     <div>
-        <label for="allPointsSelect">Todos los puntos (x,y,route,point):</label>
-        <select id="allPointsSelect" size="6"></select>
+        <label for="allPointsSelect">Todos los puntos <span style="color:#888; font-size:0.85em;">(Preview - Implementación futura)</span>:</label>
+        <select id="allPointsSelect" size="6" disabled style="opacity:0.6; cursor:not-allowed; background:#1a1a1a;"></select>
     </div>
 
     <div class="row">
@@ -195,8 +205,8 @@ const char routesPageHTML[] PROGMEM = R"rawliteral(
     </div>
 
     <div>
-        <strong>Coordenada seleccionada:</strong>
-        <pre id="selected">Ninguna</pre>
+        <strong>Información de la ruta:</strong>
+        <pre id="selected">Selecciona una ruta para ver sus waypoints</pre>
     </div>
 
     <script>
@@ -222,7 +232,15 @@ const char routesPageHTML[] PROGMEM = R"rawliteral(
                 routes = await resp.json();
                 populateRouteSelect();
                 populateAllPoints();
-                if (routes.length > 0) { routeSelect.selectedIndex = 0; populateWaypointsForRoute(0); }
+                if (routes.length > 0) { 
+                    routeSelect.selectedIndex = 0; 
+                    populateWaypointsForRoute(0); 
+                    // Mostrar información inicial de la primera ruta
+                    const firstRoute = routes[0];
+                    if (firstRoute && firstRoute.points && firstRoute.points.length > 0) {
+                        selectedPre.textContent = `Ruta: ${firstRoute.name || 'Ruta 0'}\nWaypoints: ${firstRoute.points.length}\nPrimer punto: (${firstRoute.points[0].x}, ${firstRoute.points[0].y})\nÚltimo punto: (${firstRoute.points[firstRoute.points.length-1].x}, ${firstRoute.points[firstRoute.points.length-1].y})`;
+                    }
+                }
             } catch (err) {
                 statusPre.textContent = 'No se pudieron cargar rutas: ' + err;
             }
@@ -235,26 +253,90 @@ const char routesPageHTML[] PROGMEM = R"rawliteral(
         function populateWaypointsForRoute(routeIndex) {
             waypointSelect.innerHTML = '';
             const waypoints = (routes[routeIndex] && routes[routeIndex].points) || [];
-            waypoints.forEach((pt,pIndex)=>{ const opt=document.createElement('option'); opt.value=`${routeIndex}|${pIndex}`; opt.textContent=`(${pt.x}, ${pt.y}, ${routeIndex})`; waypointSelect.appendChild(opt); });
-            if (waypoints.length===0){ const opt=document.createElement('option'); opt.textContent='(sin waypoints)'; opt.value=''; waypointSelect.appendChild(opt);} 
+            waypoints.forEach((pt,pIndex)=>{ 
+                const opt=document.createElement('option'); 
+                opt.value=`${routeIndex}|${pIndex}`; 
+                opt.textContent=`Waypoint ${pIndex + 1}: (${pt.x}, ${pt.y})`; 
+                waypointSelect.appendChild(opt); 
+            });
+            if (waypoints.length===0){ 
+                const opt=document.createElement('option'); 
+                opt.textContent='(sin waypoints)'; 
+                opt.value=''; 
+                waypointSelect.appendChild(opt);
+            }
+            // Actualizar información mostrada
+            if (waypoints.length > 0) {
+                const routeName = routes[routeIndex]?.name || `Ruta ${routeIndex}`;
+                selectedPre.textContent = `Ruta: ${routeName}\nWaypoints: ${waypoints.length}\nPrimer punto: (${waypoints[0].x}, ${waypoints[0].y})\nÚltimo punto: (${waypoints[waypoints.length-1].x}, ${waypoints[waypoints.length-1].y})`;
+            }
         }
         function populateAllPoints(){ allPointsSelect.innerHTML=''; routes.forEach((r,ri)=>{ (r.points||[]).forEach((pt,pi)=>{ const opt=document.createElement('option'); opt.value=`${ri}|${pi}`; opt.textContent=`(${pt.x}, ${pt.y}, ${ri}, ${pi}) — ${r.name||''}`; allPointsSelect.appendChild(opt); }); }); }
-        function showSelectedFromOptionValue(value){ if(!value){ selectedPre.textContent='Ninguna'; return; } const [r,p]=value.split('|').map(n=>parseInt(n,10)); if(isNaN(r)||isNaN(p)||!routes[r]||!routes[r].points[p]){ selectedPre.textContent='Valor inválido'; return; } const pt=routes[r].points[p]; selectedPre.textContent=`Ruta: ${routes[r].name}\nPunto: ${p}\nCoordenadas: x=${pt.x}, y=${pt.y}`; }
+        function showSelectedFromOptionValue(value){ 
+            if(!value){ 
+                selectedPre.textContent='Selecciona una ruta para ver sus waypoints'; 
+                return; 
+            } 
+            const [r,p]=value.split('|').map(n=>parseInt(n,10)); 
+            if(isNaN(r)||isNaN(p)||!routes[r]||!routes[r].points[p]){ 
+                selectedPre.textContent='Valor inválido'; 
+                return; 
+            } 
+            const pt=routes[r].points[p]; 
+            const routeName = routes[r].name || `Ruta ${r}`;
+            selectedPre.textContent=`Ruta: ${routeName}\nWaypoint ${p + 1} de ${routes[r].points.length}\nCoordenadas: x=${pt.x}, y=${pt.y}\n\n(Preview - Selección de waypoints disponible en futuras versiones)`;
+        }
 
-        routeSelect.addEventListener('change', ()=>{ const idx=parseInt(routeSelect.value,10); populateWaypointsForRoute(idx); if(waypointSelect.options.length>0){ waypointSelect.selectedIndex=0; showSelectedFromOptionValue(waypointSelect.value);} });
-        waypointSelect.addEventListener('change', ()=> showSelectedFromOptionValue(waypointSelect.value));
-        allPointsSelect.addEventListener('change', ()=>{ showSelectedFromOptionValue(allPointsSelect.value); const [r,p]=allPointsSelect.value.split('|').map(n=>parseInt(n,10)); if(!isNaN(r)){ routeSelect.value = r; populateWaypointsForRoute(r); if(!isNaN(p) && waypointSelect.options[p]) waypointSelect.selectedIndex = p; } });
+        // Actualizar waypoints cuando cambia la ruta (solo para visualización)
+        routeSelect.addEventListener('change', ()=>{ 
+            const idx=parseInt(routeSelect.value,10); 
+            populateWaypointsForRoute(idx); 
+            if(waypointSelect.options.length>0){ 
+                waypointSelect.selectedIndex=0; 
+                // Mostrar información del primer waypoint como preview
+                const firstWaypoint = waypointSelect.options[0];
+                if (firstWaypoint && firstWaypoint.value) {
+                    showSelectedFromOptionValue(firstWaypoint.value);
+                } else {
+                    selectedPre.textContent = `Ruta: ${routes[idx]?.name || 'N/A'}\nWaypoints: ${routes[idx]?.points?.length || 0}`;
+                }
+            }
+        });
+        
+        // Los waypoints están deshabilitados, pero mantenemos los listeners para futuro
+        waypointSelect.addEventListener('change', ()=> {
+            if (!waypointSelect.disabled) {
+                showSelectedFromOptionValue(waypointSelect.value);
+            }
+        });
+        
+        allPointsSelect.addEventListener('change', ()=>{ 
+            if (!allPointsSelect.disabled) {
+                showSelectedFromOptionValue(allPointsSelect.value); 
+                const [r,p]=allPointsSelect.value.split('|').map(n=>parseInt(n,10)); 
+                if(!isNaN(r)){ 
+                    routeSelect.value = r; 
+                    populateWaypointsForRoute(r); 
+                    if(!isNaN(p) && waypointSelect.options[p]) waypointSelect.selectedIndex = p; 
+                }
+            }
+        });
 
         async function startRoute(dir) {
+            // Solo usar la ruta seleccionada, ignorar waypoints (están deshabilitados)
             const ridx = parseInt(routeSelect.value || '0', 10);
+            if (isNaN(ridx) || ridx < 0) {
+                statusPre.textContent = 'Error: Selecciona una ruta válida';
+                return;
+            }
             const delaySec = parseFloat(document.getElementById('delaySec').value || '0');
             const delayMs = Math.max(0, Math.round(delaySec*1000));
             const url = `${START_URL}?route=${ridx}&dir=${dir}&delay=${delayMs}`;
             try {
-                statusPre.textContent = 'Programando route...';
+                statusPre.textContent = `Programando ruta ${routes[ridx]?.name || ridx} (${dir})...`;
                 const r = await fetch(url);
                 if (!r.ok) throw new Error('HTTP '+r.status);
-                statusPre.textContent = 'Route programada';
+                statusPre.textContent = `Ruta programada: ${routes[ridx]?.name || ridx} (${dir})`;
                 // start polling status
             } catch (e) { statusPre.textContent = 'Error: '+e; }
         }
@@ -622,31 +704,80 @@ float normalizeAngle(float a) {
 }
 
 // begin the next waypoint (calculate turn and start it)
+// NOTA: Omite el primer waypoint en IDA (siempre está en 0,0) y el último en RETORNO (ya está ahí)
 void beginNextWaypoint() {
     int idx = routeExec.routeIndex;
     if (idx < 0 || idx >= ROUTE_COUNT) { stopRouteExecution(); return; }
     int count = routesCounts[idx];
-    if (routeExec.currentPoint >= count) {
-        // reached end of route
+    
+    // Si la ruta tiene solo 1 waypoint, no hay nada que visitar (se omite en ambos sentidos)
+    if (count <= 1) {
+        Serial.println(F("Ruta tiene solo 1 waypoint. No hay waypoints a visitar (se omite)."));
         if (!routeExec.returnModeActive) {
-            // Outbound finished: wait for operator confirmation before starting return.
-            // Do NOT perform the 180deg turn now (avoid doing it twice when confirming).
-            routeExec.awaitingConfirm = true;
-            routeExec.waitingForReturnConfirm = true;
-            routeExec.state = ROUTE_WAITING;
-            Serial.println(F("Reached final waypoint: awaiting return confirmation (no auto-turn)"));
-            return;
-        } else {
-            // Return leg finished: perform final 180° then finish route
             routeExec.postFinishTurn = true;
             startAutoTurn(180);
             routeExec.state = ROUTE_TURNING;
-            Serial.println(F("Return leg finished: performing final 180deg turn and ending route"));
+        } else {
+            routeExec.active = false;
+            routeExec.state = ROUTE_DONE;
+            Serial.println(F("Ruta completada (sin waypoints a visitar)."));
+        }
+        return;
+    }
+    
+    // Calcular el número efectivo de waypoints a visitar (omitiendo primero/último según dirección)
+    int effectiveCount = count - 1; // Restamos 1 porque omitimos un waypoint
+    
+    // Verificar si hemos completado todos los waypoints efectivos
+    if (routeExec.currentPoint >= effectiveCount) {
+        // reached end of route
+        if (!routeExec.returnModeActive) {
+            // IDA finished: perform 180° turn to face return direction, then wait for confirmation
+            Serial.println(F("Ruta de IDA completada. Girando 180° para preparar retorno..."));
+            routeExec.postFinishTurn = true;
+            startAutoTurn(180);
+            routeExec.state = ROUTE_TURNING;
+            // El giro se completará en handleAutoTurn y luego esperará confirmación
+            return;
+        } else {
+            // RETORNO finished: perform final 180° then finish route
+            Serial.println(F("Ruta de RETORNO completada. Girando 180° para finalizar..."));
+            routeExec.postFinishTurn = true;
+            startAutoTurn(180);
+            routeExec.state = ROUTE_TURNING;
+            Serial.println(F("Retorno finalizado. Ruta completa terminada."));
             return;
         }
     }
 
-    int pIndex = (routeExec.direction == 1) ? routeExec.currentPoint : (count - 1 - routeExec.currentPoint);
+    // Calcular índice del waypoint a visitar (omitiendo primero en IDA, último en RETORNO)
+    int pIndex;
+    if (routeExec.direction == 1) {
+        // IDA: omitir waypoint 0 (índice 0), empezar desde waypoint 1 (índice 1)
+        // currentPoint 0 → waypoint índice 1
+        // currentPoint 1 → waypoint índice 2
+        // etc.
+        pIndex = routeExec.currentPoint + 1;
+    } else {
+        // RETORNO: omitir último waypoint (índice count-1), visitar todos los demás en orden inverso
+        // Ejemplo con 4 waypoints [0,0], [30,0], [30,30], [0,30]:
+        // - Omite: [0,30] (índice 3, último)
+        // - Visita: [30,30] (índice 2) → [30,0] (índice 1) → [0,0] (índice 0)
+        // currentPoint 0 → waypoint índice count-2 (penúltimo)
+        // currentPoint 1 → waypoint índice count-3
+        // currentPoint 2 → waypoint índice count-4 = 0 (primero, [0,0])
+        // etc.
+        pIndex = count - 2 - routeExec.currentPoint;
+    }
+    
+    // Validar que el índice esté en rango
+    if (pIndex < 0 || pIndex >= count) {
+        Serial.print(F("Error: índice de waypoint fuera de rango: "));
+        Serial.println(pIndex);
+        stopRouteExecution();
+        return;
+    }
+    
     routeExec.targetX = routesPoints[idx][pIndex].x;
     routeExec.targetY = routesPoints[idx][pIndex].y;
 
@@ -659,9 +790,23 @@ void beginNextWaypoint() {
     float desired = atan2f(dy, dx) * 180.0f / PI;
     float delta = normalizeAngle(desired - curTh);
 
-    Serial.print(F("Going to waypoint: "));
-    Serial.print(routeExec.targetX); Serial.print(F(",")); Serial.println(routeExec.targetY);
-    Serial.print(F("Turn delta: ")); Serial.println(delta);
+    // Log información del waypoint actual
+    int effectiveCount = (count > 1) ? count - 1 : count;
+    Serial.print(F("Waypoint "));
+    Serial.print(routeExec.currentPoint + 1);
+    Serial.print(F("/"));
+    Serial.print(effectiveCount);
+    Serial.print(F(" de ruta "));
+    Serial.print(routeNames[idx]);
+    Serial.print(F(" (índice "));
+    Serial.print(pIndex);
+    Serial.print(F("): ("));
+    Serial.print(routeExec.targetX);
+    Serial.print(F(","));
+    Serial.print(routeExec.targetY);
+    Serial.print(F(") - Giro: "));
+    Serial.print(delta, 1);
+    Serial.println(F("°"));
 
     // start turn using existing routine
     startAutoTurn(delta);
@@ -677,15 +822,31 @@ bool startRouteExecution(int routeIndex, bool retorno, unsigned long delayMillis
     routeExec.direction = retorno ? -1 : 1;
     routeExec.requestMillis = millis();
     routeExec.delayMs = delayMilliseconds;
-    routeExec.currentPoint = 0;
+    routeExec.currentPoint = 0; // Empezará desde 0, pero beginNextWaypoint omitirá el primer/último waypoint
     routeExec.state = (delayMilliseconds > 0) ? ROUTE_WAITING : ROUTE_IDLE;
     // require operator confirmation by default; will auto-start when delay expires
     routeExec.awaitingConfirm = true;
 
-    Serial.print(F("Route scheduled: "));
+    int totalWaypoints = routesCounts[routeIndex];
+    int effectiveWaypoints = (totalWaypoints > 1) ? totalWaypoints - 1 : totalWaypoints;
+    
+    Serial.print(F("Ruta programada: "));
     Serial.print(routeNames[routeIndex]);
-    Serial.print(F(" retorno:")); Serial.print(retorno ? 1 : 0);
-    Serial.print(F(" delay_ms:")); Serial.println(delayMilliseconds);
+    Serial.print(F(" - Modo: "));
+    Serial.print(retorno ? F("RETORNO") : F("IDA"));
+    Serial.print(F(" - Waypoints a visitar: "));
+    Serial.print(effectiveWaypoints);
+    Serial.print(F(" de "));
+    Serial.print(totalWaypoints);
+    Serial.print(F(" totales"));
+    if (retorno) {
+        Serial.print(F(" (omitiendo último waypoint)"));
+    } else {
+        Serial.print(F(" (omitiendo primer waypoint 0,0)"));
+    }
+    Serial.print(F(" - Delay: "));
+    Serial.print(delayMilliseconds);
+    Serial.println(F(" ms"));
 
     if (delayMilliseconds == 0) beginNextWaypoint();
     return true;
@@ -1051,13 +1212,16 @@ void loop() {
                 routeExec.moveStartLeft = encoders.readLeft();
                 routeExec.moveStartRight = encoders.readRight();
                 if (routeExec.moveTargetPulses <= 0) {
-                    // nothing to move, advance
+                    // Ya está en el waypoint, avanzar al siguiente
+                    Serial.print(F("Waypoint alcanzado. Avanzando al siguiente..."));
                     routeExec.currentPoint++;
                     beginNextWaypoint();
                 } else {
                     motors.moveForward();
                     routeExec.state = ROUTE_MOVING;
-                    Serial.print(F("Moving pulses: ")); Serial.println(routeExec.moveTargetPulses);
+                    Serial.print(F("Avanzando hacia waypoint: "));
+                    Serial.print(routeExec.moveTargetPulses);
+                    Serial.println(F(" pulsos"));
                 }
             }
         } else if (routeExec.state == ROUTE_MOVING) {
@@ -1145,9 +1309,15 @@ void loop() {
                         routeExec.moveStartLeft = encoders.readLeft();
                         routeExec.moveStartRight = encoders.readRight();
                         if (routeExec.moveTargetPulses <= 0) {
+                            // Ya alcanzó el waypoint después de evasión, avanzar al siguiente
+                            Serial.println(F("Waypoint alcanzado después de evasión. Avanzando al siguiente..."));
                             routeExec.currentPoint++;
                             beginNextWaypoint();
                         } else {
+                            // Continuar hacia el mismo waypoint desde nueva posición
+                            Serial.print(F("Continuando hacia waypoint desde nueva posición: "));
+                            Serial.print(routeExec.moveTargetPulses);
+                            Serial.println(F(" pulsos"));
                             motors.moveForward();
                             routeExec.state = ROUTE_MOVING;
                         }
@@ -1159,7 +1329,12 @@ void loop() {
                 long dr = labs(encoders.readRight() - routeExec.moveStartRight);
                 long maxm = (dl > dr) ? dl : dr;
                 if (maxm >= routeExec.moveTargetPulses) {
+                    // Waypoint alcanzado, avanzar al siguiente
                     motors.stop();
+                    Serial.print(F("Waypoint alcanzado. Total waypoints visitados: "));
+                    Serial.print(routeExec.currentPoint + 1);
+                    Serial.print(F("/"));
+                    Serial.println(routesCounts[routeExec.routeIndex]);
                     routeExec.currentPoint++;
                     // small pause before next waypoint
                     delay(80);
@@ -1526,17 +1701,17 @@ void handleAutoTurn() {
         if (routeExec.postFinishTurn) {
             routeExec.postFinishTurn = false;
             if (!routeExec.returnModeActive) {
-                // We completed the 180° after outbound: wait for confirmation to start return
+                // We completed the 180° after IDA: wait for confirmation to start return
                 routeExec.awaitingConfirm = true;
                 routeExec.waitingForReturnConfirm = true;
                 routeExec.state = ROUTE_WAITING;
-                Serial.println(F("Awaiting confirmation to start return"));
+                Serial.println(F("Giro de 180° completado. Esperando confirmación para iniciar retorno..."));
                 return;
             } else {
-                // We completed the 180° after return: finish route
+                // We completed the 180° after RETORNO: finish route
                 routeExec.active = false;
                 routeExec.state = ROUTE_DONE;
-                Serial.println(F("Route and return complete"));
+                Serial.println(F("Giro de 180° completado. Ruta y retorno finalizados. Listo para nueva ruta."));
                 return;
             }
         }
@@ -1692,18 +1867,15 @@ void handleClient(WiFiClient client) {
         if (routeExec.active && routeExec.state == ROUTE_WAITING && routeExec.awaitingConfirm) {
             // If we are waiting specifically to start the return, enable return mode
             if (routeExec.waitingForReturnConfirm) {
-                // Operator confirmed return: enable return mode and perform the
-                // 180° turn now to face the return path. We mark postFinishTurn
-                // so handleAutoTurn will set the state appropriately when done.
+                // Operator confirmed return: enable return mode and start return
+                // NOTA: Ya se hizo el giro de 180° al terminar la IDA, así que no necesitamos girar de nuevo
                 routeExec.awaitingConfirm = false;
                 routeExec.waitingForReturnConfirm = false;
                 routeExec.returnModeActive = true;
                 routeExec.direction = -1; // run return
-                routeExec.currentPoint = 0; // start return from last waypoint index
-                routeExec.postFinishTurn = true;
-                startAutoTurn(180);
-                routeExec.state = ROUTE_TURNING;
-                Serial.println(F("Return confirmed by operator - performing 180deg turn to start return"));
+                routeExec.currentPoint = 0; // start return from first waypoint (omitiendo el último)
+                Serial.println(F("Retorno confirmado. Iniciando ruta de retorno..."));
+                beginNextWaypoint(); // Iniciar directamente el retorno (ya está orientado correctamente)
                 client.println(F("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nCONFIRMED_RETURN"));
             } else {
                 // normal confirm to start scheduled route
