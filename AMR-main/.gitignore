@@ -1,0 +1,34 @@
+# Ignore Arduino build artifacts and generated binaries
+/arduino/**/build/
+*/build/
+
+# Compiled object and binary files
+*.bin
+*.elf
+*.hex
+*.map
+*.o
+
+# PlatformIO
+.pio/
+.pioenvs/
+
+# Logs and temp
+*.log
+*.tmp
+*.cache
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+
+# Node modules (if any web UI work)
+node_modules/
+
+# Backup files
+*~
+*.bak
