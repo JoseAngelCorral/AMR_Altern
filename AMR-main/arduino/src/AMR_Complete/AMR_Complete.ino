@@ -76,6 +76,85 @@ WiFiServer server(80);
 // Forward declare types/functions that are referenced in generated prototypes
 struct IRSensors;
 void startAutoTurn(float angleDelta);
+// Forward declarations and sensor/constants moved up so route code can use them
+// Define turning flag early so route functions can reference it
+bool turningInProgress = false;
+float distanciaSamples(int pin, int samples, unsigned long* outMillis);
+
+// Mapeo de pines (ajustado: swap L<->R)
+// LEFT_SIDE (lateral izquierdo)  -> A5 (antes A0)
+// FRONT_LEFT (frontal izquierdo) -> A4 (antes A1)
+// BACK_CENTER (trasero central)  -> A2 (sin cambios)
+// FRONT_RIGHT (frontal derecho)  -> A1 (antes A4)
+// RIGHT_SIDE (lateral derecho)   -> A0 (antes A5)
+const int IR_LEFT_SIDE_PIN   = A5; // Lateral izquierdo (swapped)
+const int IR_FRONT_LEFT_PIN  = A4; // Frontal izquierdo (swapped)
+const int IR_BACK_CENTER_PIN = A2; // Trasero central
+const int IR_FRONT_RIGHT_PIN = A1; // Frontal derecho (swapped)
+const int IR_RIGHT_SIDE_PIN  = A0; // Lateral derecho (swapped)
+
+// Parámetros de lectura
+const int IR_NUM_SAMPLES = 6;      // número de lecturas para promediar
+int IR_THRESHOLD = 150;            // umbral por defecto (0-255). Ajustar por calibración
+// Obstacle avoidance parameters
+const float OBSTACLE_THRESHOLD_CM = 30.0f; // if front distance below this, consider obstacle
+const float AVOID_STEP_CM = 30.0f; // how far to advance when circumventing (per step)
+const float AVOID_CLEAR_MARGIN_CM = 8.0f; // extra margin to consider object cleared
+const float AVOID_MAX_STEP_CM = 200.0f; // maximum allowed advance during avoidance (safety)
+// When an obstacle is detected, wait this many ms before starting avoidance
+const unsigned long OBSTACLE_DETECTION_DELAY_MS = 2000; // 2 seconds
+
+// Estructura para devolver lecturas
+struct IRSensors {
+    int rawLeft;
+    int rawFrontLeft;
+    int rawBack;
+    int rawFrontRight;
+    int rawRight;
+    bool left;
+    bool frontLeft;
+    bool back;
+    bool frontRight;
+    bool right;
+};
+
+// Inicializar pines analógicos (no es necesario pinMode para analogRead,
+// pero dejamos una función para futura configuración y documentación)
+void setupIRSensors() {
+    // No es necesario configurar A0..A5 con pinMode para analogRead en Arduino,
+    // pero si los sensores necesitan alimentación o referencias externas, eso se
+    // debe hacer en el cableado físico.
+    // Añadir una pequeña espera para estabilizar sensores si es necesario
+    delay(20);
+}
+
+// Leer un pin IR con promedio de N muestras
+int readIRRaw(int pin) {
+    long acc = 0;
+    for (int i = 0; i < IR_NUM_SAMPLES; ++i) {
+        acc += analogRead(pin);
+        delay(4);
+    }
+    int avg = (int)(acc / IR_NUM_SAMPLES);
+    return avg;
+}
+
+IRSensors readIRSensors() {
+    IRSensors s;
+    s.rawLeft = readIRRaw(IR_LEFT_SIDE_PIN);
+    s.rawFrontLeft = readIRRaw(IR_FRONT_LEFT_PIN);
+    s.rawBack = readIRRaw(IR_BACK_CENTER_PIN);
+    s.rawFrontRight = readIRRaw(IR_FRONT_RIGHT_PIN);
+    s.rawRight = readIRRaw(IR_RIGHT_SIDE_PIN);
+
+    // Detección booleana (suponer HIGH -> mayor valor -> detectado)
+    s.left = s.rawLeft >= IR_THRESHOLD;
+    s.frontLeft = s.rawFrontLeft >= IR_THRESHOLD;
+    s.back = s.rawBack >= IR_THRESHOLD;
+    s.frontRight = s.rawFrontRight >= IR_THRESHOLD;
+    s.right = s.rawRight >= IR_THRESHOLD;
+    return s;
+}
 
 // ----------------------
 // Routes data (for dropdown UI)
@@ -1142,7 +1221,7 @@ unsigned long lastPositionUpdate = 0;
 const unsigned int POSITION_UPDATE_INTERVAL = 50;   // Actualizar cada 50ms
 
 // Variables para giros automáticos
-bool turningInProgress = false;
+// (defined earlier)
 float targetAngle = 0;
 unsigned long turnStartTime = 0;
 const unsigned int MAX_TURN_TIME = 4000; // 4 segundos máximo para girar
@@ -1227,98 +1306,7 @@ String getLogsText() {
 // - Funciones logPrint/logPrintln: Imprimen a Serial y almacenan en buffer
 // -------------------------------------------------------------------------------
 
-// ========================================
-//       SENSORES INFRARROJOS (ANALÓGICOS)
-// ========================================
-// Sistema de 5 sensores IR analógicos para detección de obstáculos y navegación.
-// 
-// Funcionamiento:
-// - Lectura analógica 0-1023 (ADC de 10 bits)
-// - Promediado de múltiples muestras para reducir ruido (IR_NUM_SAMPLES = 6)
-// - Conversión a distancia en cm usando fórmula calibrada: 
-//   distancia_cm = 17569.7 * adc^-1.2062
-// - Detección booleana basada en umbral configurable (IR_THRESHOLD = 150)
-// 
-// Uso en evasión de obstáculos:
-// - Sensores frontales (FL, FR) para detección inicial
-// - Sensores laterales (L, R) para elegir lado de evasión
-// - Sensor opuesto al giro como "sonda" durante evasión lateral
-// - Confirmación de 2 segundos (OBSTACLE_DETECTION_DELAY_MS) antes de evadir
-
-// Mapeo de pines (ajustado: swap L<->R)
-// LEFT_SIDE (lateral izquierdo)  -> A5 (antes A0)
-// FRONT_LEFT (frontal izquierdo) -> A4 (antes A1)
-// BACK_CENTER (trasero central)  -> A2 (sin cambios)
-// FRONT_RIGHT (frontal derecho)  -> A1 (antes A4)
-// RIGHT_SIDE (lateral derecho)   -> A0 (antes A5)
-const int IR_LEFT_SIDE_PIN   = A5; // Lateral izquierdo (swapped)
-const int IR_FRONT_LEFT_PIN  = A4; // Frontal izquierdo (swapped)
-const int IR_BACK_CENTER_PIN = A2; // Trasero central
-const int IR_FRONT_RIGHT_PIN = A1; // Frontal derecho (swapped)
-const int IR_RIGHT_SIDE_PIN  = A0; // Lateral derecho (swapped)
-
-// Parámetros de lectura
-const int IR_NUM_SAMPLES = 6;      // número de lecturas para promediar
-int IR_THRESHOLD = 150;            // umbral por defecto (0-255). Ajustar por calibración
-// Obstacle avoidance parameters
-const float OBSTACLE_THRESHOLD_CM = 30.0f; // if front distance below this, consider obstacle
-const float AVOID_STEP_CM = 30.0f; // how far to advance when circumventing (per step)
-const float AVOID_CLEAR_MARGIN_CM = 8.0f; // extra margin to consider object cleared
-const float AVOID_MAX_STEP_CM = 200.0f; // maximum allowed advance during avoidance (safety)
-// When an obstacle is detected, wait this many ms before starting avoidance
-const unsigned long OBSTACLE_DETECTION_DELAY_MS = 2000; // 2 seconds
-
-// Estructura para devolver lecturas
-struct IRSensors {
-    int rawLeft;
-    int rawFrontLeft;
-    int rawBack;
-    int rawFrontRight;
-    int rawRight;
-    bool left;
-    bool frontLeft;
-    bool back;
-    bool frontRight;
-    bool right;
-};
-
-// Inicializar pines analógicos (no es necesario pinMode para analogRead,
-// pero dejamos una función para futura configuración y documentación)
-void setupIRSensors() {
-    // No es necesario configurar A0..A5 con pinMode para analogRead en Arduino,
-    // pero si los sensores necesitan alimentación o referencias externas, eso se
-    // debe hacer en el cableado físico.
-    // Añadir una pequeña espera para estabilizar sensores si es necesario
-    delay(20);
-}
-
-// Leer un pin IR con promedio de N muestras
-int readIRRaw(int pin) {
-    long acc = 0;
-    for (int i = 0; i < IR_NUM_SAMPLES; ++i) {
-        acc += analogRead(pin);
-        delay(4);
-    }
-    int avg = (int)(acc / IR_NUM_SAMPLES);
-    return avg;
-}
-
-IRSensors readIRSensors() {
-    IRSensors s;
-    s.rawLeft = readIRRaw(IR_LEFT_SIDE_PIN);
-    s.rawFrontLeft = readIRRaw(IR_FRONT_LEFT_PIN);
-    s.rawBack = readIRRaw(IR_BACK_CENTER_PIN);
-    s.rawFrontRight = readIRRaw(IR_FRONT_RIGHT_PIN);
-    s.rawRight = readIRRaw(IR_RIGHT_SIDE_PIN);
-
-    // Detección booleana (suponer HIGH -> mayor valor -> detectado)
-    s.left = s.rawLeft >= IR_THRESHOLD;
-    s.frontLeft = s.rawFrontLeft >= IR_THRESHOLD;
-    s.back = s.rawBack >= IR_THRESHOLD;
-    s.frontRight = s.rawFrontRight >= IR_THRESHOLD;
-    s.right = s.rawRight >= IR_THRESHOLD;
-    return s;
-}
+// (Sensors/IR section moved earlier to ensure declarations precede usage)
 
 // Convertir lectura raw del sensor IR (0-1023) a distancia aproximada en cm.
 // Conversión calibrada (modelo empírico) de ADC -> cm.
@@ -1455,12 +1443,6 @@ void loop() {
 
     // Ejecutar ruta (sistema basado en funciones, sin máquina de estados explícita)
     executeRoute();
-
-    // ========================================
-    //     SEGUIMIENTO DE PARED
-    // ========================================
-    // Nota: El seguimiento de pared y las rutas son mutuamente excluyentes
-    if (wallFollow.active && !routeExec.active) {
 
     // ========================================
     //     SEGUIMIENTO DE PARED
