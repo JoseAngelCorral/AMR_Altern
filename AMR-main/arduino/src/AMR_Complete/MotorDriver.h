@@ -60,7 +60,7 @@ private:
     // Factor de compensación para motor derecho (corrige curva a la derecha)
     // Si el robot se curva a la derecha, reducir este valor (< 1.0)
     // Si el robot se curva a la izquierda, aumentar este valor (> 1.0)
-    static constexpr float RIGHT_MOTOR_COMPENSATION = 0.85f;
+    static constexpr float RIGHT_MOTOR_COMPENSATION = 1.05f;
     
 public:
     void init();
