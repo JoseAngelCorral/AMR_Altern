@@ -673,21 +673,18 @@ Encoder encoders;
 Odometry odometry(&encoders);
 
 // ----------------------
-// MÁQUINA DE ESTADOS DE EJECUCIÓN DE RUTAS
+// SISTEMA DE EJECUCIÓN DE RUTAS (SIN MÁQUINA DE ESTADOS EXPLÍCITA)
 // ----------------------
-// Estados principales de la máquina de estados:
-// - ROUTE_IDLE: Inactivo, sin ruta en ejecución
-// - ROUTE_WAITING: Esperando delay inicial o confirmación del operador
-// - ROUTE_TURNING: Realizando giro hacia el siguiente waypoint
-// - ROUTE_MOVING: Moviéndose hacia el waypoint objetivo (con evasión de obstáculos)
-// - ROUTE_DONE: Ruta completada
+// Sistema basado en funciones que retornan progreso en lugar de máquina de estados
+// - waitForDelay(): Espera delay inicial o confirmación
+// - executeTurn(): Realiza giro hacia el siguiente waypoint
+// - executeMove(): Movimiento hacia waypoint con evasión de obstáculos
 //
 // Sistema de evasión de obstáculos integrado:
 // - Estados: 0=idle, 1=TURN (90°), 2=FORWARD (avance lateral), 
 //            3=TURNBACK (-90°), 4=CROSS_FORWARD (cruzar), 5=DONE
 // - Confirmación de 2 segundos antes de iniciar evasión
 // - Selección automática del lado con más espacio libre
-enum RouteState { ROUTE_IDLE=0, ROUTE_WAITING, ROUTE_TURNING, ROUTE_MOVING, ROUTE_DONE };
 struct RouteExecution {
     bool active = false;
     int routeIndex = 0;
@@ -695,7 +692,10 @@ struct RouteExecution {
     unsigned long requestMillis = 0;
     unsigned long delayMs = 0;
     int currentPoint = 0; // 0..(n-1)
-    RouteState state = ROUTE_IDLE;
+    // Flags de operación en progreso (reemplazan estados explícitos)
+    bool isWaiting = false; // esperando delay o confirmación
+    bool isTurning = false; // realizando giro hacia waypoint
+    bool isMoving = false; // moviéndose hacia waypoint
     bool awaitingConfirm = false;
     bool waitingForReturnConfirm = false; // waiting confirmation after finishing ida
     bool returnModeActive = false; // true when executing return leg
@@ -739,7 +739,9 @@ const int WALL_FOLLOW_TURN_SPEED = 80; // velocidad para giros durante seguimien
 void stopRouteExecution() {
     if (!routeExec.active) return;
     routeExec.active = false;
-    routeExec.state = ROUTE_IDLE;
+    routeExec.isWaiting = false;
+    routeExec.isTurning = false;
+    routeExec.isMoving = false;
     motors.stop();
     Serial.println(F("Route execution aborted"));
 }
@@ -776,6 +778,187 @@ float normalizeAngle(float a) {
     return a;
 }
 
+// ========================================
+//     FUNCIONES DE EJECUCIÓN DE RUTA
+// ========================================
+// Sistema basado en funciones que retornan progreso en lugar de máquina de estados
+
+// Espera delay inicial o confirmación
+// Retorna true cuando puede continuar
+bool waitForDelay() {
+    if (!routeExec.isWaiting) return true;
+    if (routeExec.awaitingConfirm) return false; // esperando confirmación manual
+    unsigned long now = millis();
+    if (now - routeExec.requestMillis >= routeExec.delayMs) {
+        routeExec.isWaiting = false;
+        return true;
+    }
+    return false;
+}
+
+// Ejecuta giro hacia el waypoint objetivo
+// Retorna true cuando el giro ha terminado
+bool executeTurn() {
+    if (!routeExec.isTurning) return true;
+    
+    // wait for turningInProgress to finish (handled by handleAutoTurn)
+    if (!turningInProgress) {
+        // Giro completado, calcular movimiento hacia target
+        float dx = routeExec.targetX - odometry.getX();
+        float dy = routeExec.targetY - odometry.getY();
+        float dist = sqrtf(dx*dx + dy*dy);
+        float pulsesF = (dist / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
+        routeExec.moveTargetPulses = (long)(pulsesF + 0.5f);
+        routeExec.moveStartLeft = encoders.readLeft();
+        routeExec.moveStartRight = encoders.readRight();
+        
+        routeExec.isTurning = false;
+        
+        if (routeExec.moveTargetPulses <= 0) {
+            // Ya está en el waypoint, avanzar al siguiente
+            Serial.print(F("Waypoint alcanzado. Avanzando al siguiente..."));
+            routeExec.currentPoint++;
+            beginNextWaypoint();
+        } else {
+            // Iniciar movimiento
+            motors.moveForward();
+            routeExec.isMoving = true;
+            Serial.print(F("Avanzando hacia waypoint: "));
+            Serial.print(routeExec.moveTargetPulses);
+            Serial.println(F(" pulsos"));
+        }
+        return true;
+    }
+    return false;
+}
+
+// Ejecuta movimiento hacia waypoint con evasión de obstáculos
+// Retorna true cuando el movimiento ha terminado
+bool executeMove() {
+    if (!routeExec.isMoving) return true;
+    
+    // First, check for obstacles using IR sensors
+    float dFL = distanciaSamples(IR_FRONT_LEFT_PIN, 3, NULL);
+    float dFR = distanciaSamples(IR_FRONT_RIGHT_PIN, 3, NULL);
+    float frontMin = min(dFL, dFR);
+    
+    // Obstacle detection and avoidance logic
+    if (!routeExec.obstacleActive && !routeExec.obstacleWaitActive && frontMin <= OBSTACLE_THRESHOLD_CM) {
+        routeExec.obstacleWaitActive = true;
+        routeExec.obstacleWaitStartMillis = millis();
+        Serial.print(F("Obstacle seen briefly (waiting to confirm). frontMin=")); Serial.println(frontMin);
+    } else if (!routeExec.obstacleActive && routeExec.obstacleWaitActive) {
+        // check if wait period expired
+        if (millis() - routeExec.obstacleWaitStartMillis >= OBSTACLE_DETECTION_DELAY_MS) {
+            // re-sample front to confirm
+            float dFL2 = distanciaSamples(IR_FRONT_LEFT_PIN, 3, NULL);
+            float dFR2 = distanciaSamples(IR_FRONT_RIGHT_PIN, 3, NULL);
+            float frontMin2 = min(dFL2, dFR2);
+            routeExec.obstacleWaitActive = false;
+            if (frontMin2 <= OBSTACLE_THRESHOLD_CM) {
+                // Confirmed obstacle: trigger avoidance
+                float dL = distanciaSamples(IR_LEFT_SIDE_PIN, 3, NULL);
+                float dR = distanciaSamples(IR_RIGHT_SIDE_PIN, 3, NULL);
+                routeExec.obstacleSide = (dL > dR) ? +1 : -1;
+                routeExec.obstacleActive = true;
+                routeExec.obstacleState = 1; // TURN
+                motors.stop();
+                delay(30);
+                routeExec.obstacleProbePin = (routeExec.obstacleSide == +1) ? IR_RIGHT_SIDE_PIN : IR_LEFT_SIDE_PIN;
+                float pulsesF = (AVOID_MAX_STEP_CM / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
+                routeExec.obstacleMoveMaxPulses = (long)(pulsesF + 0.5f);
+                startAutoTurn(routeExec.obstacleSide * 90.0f);
+                Serial.print(F("Obstacle confirmed. side=")); Serial.print(routeExec.obstacleSide);
+                Serial.print(F(" frontMin=")); Serial.println(frontMin2);
+            } else {
+                Serial.print(F("Obstacle cleared during wait. frontMin=")); Serial.println(frontMin2);
+            }
+        }
+    } else if (routeExec.obstacleActive) {
+        // Obstacle avoidance in progress
+        if (routeExec.obstacleState == 2) {
+            // moving forward step: sensor-driven completion
+            float probeDist = distanciaSamples(routeExec.obstacleProbePin, 3, NULL);
+            long dl = labs(encoders.readLeft() - routeExec.obstacleMoveStartLeft);
+            long dr = labs(encoders.readRight() - routeExec.obstacleMoveStartRight);
+            long maxm = (dl > dr) ? dl : dr;
+            if (probeDist >= (OBSTACLE_THRESHOLD_CM + AVOID_CLEAR_MARGIN_CM) || maxm >= routeExec.obstacleMoveMaxPulses) {
+                motors.stop();
+                delay(30);
+                routeExec.obstacleState = 3; // TURNBACK
+                startAutoTurn(-routeExec.obstacleSide * 90.0f);
+            }
+        } else if (routeExec.obstacleState == 4) {
+            // crossing forward step
+            long dl = labs(encoders.readLeft() - routeExec.obstacleMoveStartLeft);
+            long dr = labs(encoders.readRight() - routeExec.obstacleMoveStartRight);
+            long maxm = (dl > dr) ? dl : dr;
+            if (maxm >= routeExec.obstacleMoveTargetPulses) {
+                motors.stop();
+                delay(30);
+                routeExec.obstacleState = 5; // DONE
+                routeExec.obstacleActive = false;
+                Serial.println(F("Obstacle avoidance finished."));
+                // recompute movement towards same waypoint
+                float dx = routeExec.targetX - odometry.getX();
+                float dy = routeExec.targetY - odometry.getY();
+                float dist = sqrtf(dx*dx + dy*dy);
+                float pulsesF = (dist / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
+                routeExec.moveTargetPulses = (long)(pulsesF + 0.5f);
+                routeExec.moveStartLeft = encoders.readLeft();
+                routeExec.moveStartRight = encoders.readRight();
+                if (routeExec.moveTargetPulses <= 0) {
+                    Serial.println(F("Waypoint alcanzado después de evasión. Avanzando al siguiente..."));
+                    routeExec.currentPoint++;
+                    beginNextWaypoint();
+                    routeExec.isMoving = false;
+                    return true;
+                } else {
+                    Serial.print(F("Continuando hacia waypoint desde nueva posición: "));
+                    Serial.print(routeExec.moveTargetPulses);
+                    Serial.println(F(" pulsos"));
+                    motors.moveForward();
+                }
+            }
+        }
+    } else {
+        // Normal movement completion check (no obstacle active)
+        long dl = labs(encoders.readLeft() - routeExec.moveStartLeft);
+        long dr = labs(encoders.readRight() - routeExec.moveStartRight);
+        long maxm = (dl > dr) ? dl : dr;
+        if (maxm >= routeExec.moveTargetPulses) {
+            // Waypoint alcanzado
+            motors.stop();
+            Serial.print(F("Waypoint alcanzado. Total waypoints visitados: "));
+            Serial.print(routeExec.currentPoint + 1);
+            Serial.print(F("/"));
+            Serial.println(routesCounts[routeExec.routeIndex]);
+            routeExec.currentPoint++;
+            delay(80);
+            beginNextWaypoint();
+            routeExec.isMoving = false;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Función principal de ejecución de ruta (reemplaza máquina de estados)
+void executeRoute() {
+    if (!routeExec.active) return;
+    
+    // Ejecutar en orden: wait -> turn -> move
+    if (routeExec.isWaiting) {
+        if (waitForDelay()) {
+            beginNextWaypoint();
+        }
+    } else if (routeExec.isTurning) {
+        executeTurn();
+    } else if (routeExec.isMoving) {
+        executeMove();
+    }
+}
+
 // begin the next waypoint (calculate turn and start it)
 // NOTA: Omite el primer waypoint en IDA (siempre está en 0,0) y el último en RETORNO (ya está ahí)
 void beginNextWaypoint() {
@@ -789,10 +972,12 @@ void beginNextWaypoint() {
         if (!routeExec.returnModeActive) {
             routeExec.postFinishTurn = true;
             startAutoTurn(180);
-            routeExec.state = ROUTE_TURNING;
+            routeExec.isTurning = true;
         } else {
             routeExec.active = false;
-            routeExec.state = ROUTE_DONE;
+            routeExec.isWaiting = false;
+            routeExec.isTurning = false;
+            routeExec.isMoving = false;
             Serial.println(F("Ruta completada (sin waypoints a visitar)."));
         }
         return;
@@ -809,7 +994,8 @@ void beginNextWaypoint() {
             Serial.println(F("Ruta de IDA completada. Girando 180° para preparar retorno..."));
             routeExec.postFinishTurn = true;
             startAutoTurn(180);
-            routeExec.state = ROUTE_TURNING;
+            routeExec.isMoving = false;
+            routeExec.isTurning = true;
             // El giro se completará en handleAutoTurn y luego esperará confirmación
             return;
         } else {
@@ -817,7 +1003,8 @@ void beginNextWaypoint() {
             Serial.println(F("Ruta de RETORNO completada. Girando 180° para finalizar..."));
             routeExec.postFinishTurn = true;
             startAutoTurn(180);
-            routeExec.state = ROUTE_TURNING;
+            routeExec.isMoving = false;
+            routeExec.isTurning = true;
             Serial.println(F("Retorno finalizado. Ruta completa terminada."));
             return;
         }
@@ -883,7 +1070,7 @@ void beginNextWaypoint() {
 
     // start turn using existing routine
     startAutoTurn(delta);
-    routeExec.state = ROUTE_TURNING;
+    routeExec.isTurning = true;
 }
 
 // schedule route execution
@@ -896,7 +1083,9 @@ bool startRouteExecution(int routeIndex, bool retorno, unsigned long delayMillis
     routeExec.requestMillis = millis();
     routeExec.delayMs = delayMilliseconds;
     routeExec.currentPoint = 0; // Empezará desde 0, pero beginNextWaypoint omitirá el primer/último waypoint
-    routeExec.state = (delayMilliseconds > 0) ? ROUTE_WAITING : ROUTE_IDLE;
+    routeExec.isWaiting = (delayMilliseconds > 0);
+    routeExec.isTurning = false;
+    routeExec.isMoving = false;
     // require operator confirmation by default; will auto-start when delay expires
     routeExec.awaitingConfirm = true;
 
@@ -1234,10 +1423,10 @@ void setup() {
 // 1. Actualización de odometría (cada 50ms)
 // 2. Procesamiento de comandos serie (si hay datos disponibles)
 // 3. Manejo de giros automáticos (verifica finalización)
-// 4. Máquina de estados de ejecución de rutas (si hay ruta activa)
-//    - ROUTE_WAITING: Espera delay o confirmación
-//    - ROUTE_TURNING: Espera finalización de giro
-//    - ROUTE_MOVING: Movimiento hacia waypoint con evasión de obstáculos
+// 4. Ejecución de rutas (sistema basado en funciones, sin máquina de estados explícita)
+//    - isWaiting: Espera delay o confirmación
+//    - isTurning: Espera finalización de giro
+//    - isMoving: Movimiento hacia waypoint con evasión de obstáculos
 // 5. Impresión de tics mientras avanza (comando 'W')
 // 6. Inspección continua (comando 'I')
 // 7. Manejo de servidor WiFi (dashboard y API HTTP)
@@ -1264,158 +1453,14 @@ void loop() {
     // Manejar giros automáticos
     handleAutoTurn();
 
-    // Route execution state machine
-    if (routeExec.active) {
-        unsigned long now = millis();
-        if (routeExec.state == ROUTE_WAITING) {
-            if (now - routeExec.requestMillis >= routeExec.delayMs) {
-                // start now
-                beginNextWaypoint();
-            }
-        } else if (routeExec.state == ROUTE_TURNING) {
-            // wait for turningInProgress to finish (handled by handleAutoTurn)
-            if (!turningInProgress) {
-                // start moving towards target
-                float dx = routeExec.targetX - odometry.getX();
-                float dy = routeExec.targetY - odometry.getY();
-                float dist = sqrtf(dx*dx + dy*dy);
-                // compute pulses required
-                float pulsesF = (dist / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
-                routeExec.moveTargetPulses = (long)(pulsesF + 0.5f);
-                routeExec.moveStartLeft = encoders.readLeft();
-                routeExec.moveStartRight = encoders.readRight();
-                if (routeExec.moveTargetPulses <= 0) {
-                    // Ya está en el waypoint, avanzar al siguiente
-                    Serial.print(F("Waypoint alcanzado. Avanzando al siguiente..."));
-                    routeExec.currentPoint++;
-                    beginNextWaypoint();
-                } else {
-                    motors.moveForward();
-                    routeExec.state = ROUTE_MOVING;
-                    Serial.print(F("Avanzando hacia waypoint: "));
-                    Serial.print(routeExec.moveTargetPulses);
-                    Serial.println(F(" pulsos"));
-                }
-            }
-        } else if (routeExec.state == ROUTE_MOVING) {
-                // First, check for obstacles using IR sensors (sampled in cm)
-                float dFL = distanciaSamples(IR_FRONT_LEFT_PIN, 3, NULL);
-                float dFR = distanciaSamples(IR_FRONT_RIGHT_PIN, 3, NULL);
-                float frontMin = min(dFL, dFR);
-                // If we detect a front obstacle we first wait briefly to avoid reacting
-                // to transient objects (e.g., a person or a passing object). Only after
-                // OBSTACLE_DETECTION_DELAY_MS will we commit to avoidance.
-                if (!routeExec.obstacleActive && !routeExec.obstacleWaitActive && frontMin <= OBSTACLE_THRESHOLD_CM) {
-                    routeExec.obstacleWaitActive = true;
-                    routeExec.obstacleWaitStartMillis = millis();
-                    Serial.print(F("Obstacle seen briefly (waiting to confirm). frontMin=")); Serial.println(frontMin);
-                } else if (!routeExec.obstacleActive && routeExec.obstacleWaitActive) {
-                    // check if wait period expired
-                    if (millis() - routeExec.obstacleWaitStartMillis >= OBSTACLE_DETECTION_DELAY_MS) {
-                        // re-sample front to confirm
-                        float dFL2 = distanciaSamples(IR_FRONT_LEFT_PIN, 3, NULL);
-                        float dFR2 = distanciaSamples(IR_FRONT_RIGHT_PIN, 3, NULL);
-                        float frontMin2 = min(dFL2, dFR2);
-                        routeExec.obstacleWaitActive = false;
-                        if (frontMin2 <= OBSTACLE_THRESHOLD_CM) {
-                            // Confirmed obstacle: trigger avoidance
-                            float dL = distanciaSamples(IR_LEFT_SIDE_PIN, 3, NULL);
-                            float dR = distanciaSamples(IR_RIGHT_SIDE_PIN, 3, NULL);
-                            routeExec.obstacleSide = (dL > dR) ? +1 : -1; // prefer left if more clearance
-                            routeExec.obstacleActive = true;
-                            routeExec.obstacleState = 1; // TURN
-                            // stop current motion and initiate a 90deg turn toward chosen side
-                            motors.stop();
-                            delay(30);
-                            // choose probe pin: sensor opposite to the turn (as requested)
-                            routeExec.obstacleProbePin = (routeExec.obstacleSide == +1) ? IR_RIGHT_SIDE_PIN : IR_LEFT_SIDE_PIN;
-                            // compute a safety cap in pulses for the sensor-based forward (AVOID_MAX_STEP_CM)
-                            {
-                                float pulsesF = (AVOID_MAX_STEP_CM / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
-                                routeExec.obstacleMoveMaxPulses = (long)(pulsesF + 0.5f);
-                            }
-                            startAutoTurn(routeExec.obstacleSide * 90.0f);
-                            Serial.print(F("Obstacle confirmed. side=")); Serial.print(routeExec.obstacleSide);
-                            Serial.print(F(" frontMin=")); Serial.println(frontMin2);
-                        } else {
-                            // false alarm; continue moving
-                            Serial.print(F("Obstacle cleared during wait. frontMin=")); Serial.println(frontMin2);
-                        }
-                    }
-                } else if (routeExec.obstacleActive) {
-                // Obstacle avoidance in progress; handle via obstacle state machine below
-                // The actual transitions are handled in handleAutoTurn() and this loop
-                // by monitoring encoders when moving forward for avoidance steps.
-                if (routeExec.obstacleState == 2) {
-                        // moving forward step: sensor-driven completion (probe opposite sensor)
-                        // read probe sensor distance
-                        float probeDist = distanciaSamples(routeExec.obstacleProbePin, 3, NULL);
-                        long dl = labs(encoders.readLeft() - routeExec.obstacleMoveStartLeft);
-                        long dr = labs(encoders.readRight() - routeExec.obstacleMoveStartRight);
-                        long maxm = (dl > dr) ? dl : dr;
-                        // If probe reports clearance beyond threshold+margin, or we hit safety cap, stop
-                        if (probeDist >= (OBSTACLE_THRESHOLD_CM + AVOID_CLEAR_MARGIN_CM) || maxm >= routeExec.obstacleMoveMaxPulses) {
-                            motors.stop();
-                            delay(30);
-                            // after forward step, initiate turn back (opposite 90°)
-                            routeExec.obstacleState = 3; // TURNBACK
-                            startAutoTurn(-routeExec.obstacleSide * 90.0f);
-                        }
-                    } else if (routeExec.obstacleState == 4) {
-                    // crossing forward step: similar completion check
-                    long dl = labs(encoders.readLeft() - routeExec.obstacleMoveStartLeft);
-                    long dr = labs(encoders.readRight() - routeExec.obstacleMoveStartRight);
-                    long maxm = (dl > dr) ? dl : dr;
-                    if (maxm >= routeExec.obstacleMoveTargetPulses) {
-                        motors.stop();
-                        delay(30);
-                        // finish avoidance
-                        routeExec.obstacleState = 5; // DONE
-                        routeExec.obstacleActive = false;
-                        Serial.println(F("Obstacle avoidance finished."));
-                        // recompute movement towards same waypoint from new pose
-                        float dx = routeExec.targetX - odometry.getX();
-                        float dy = routeExec.targetY - odometry.getY();
-                        float dist = sqrtf(dx*dx + dy*dy);
-                        float pulsesF = (dist / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
-                        routeExec.moveTargetPulses = (long)(pulsesF + 0.5f);
-                        routeExec.moveStartLeft = encoders.readLeft();
-                        routeExec.moveStartRight = encoders.readRight();
-                        if (routeExec.moveTargetPulses <= 0) {
-                            // Ya alcanzó el waypoint después de evasión, avanzar al siguiente
-                            Serial.println(F("Waypoint alcanzado después de evasión. Avanzando al siguiente..."));
-                            routeExec.currentPoint++;
-                            beginNextWaypoint();
-                        } else {
-                            // Continuar hacia el mismo waypoint desde nueva posición
-                            Serial.print(F("Continuando hacia waypoint desde nueva posición: "));
-                            Serial.print(routeExec.moveTargetPulses);
-                            Serial.println(F(" pulsos"));
-                            motors.moveForward();
-                            routeExec.state = ROUTE_MOVING;
-                        }
-                    }
-                }
-            } else {
-                // Normal movement completion check (no obstacle active)
-                long dl = labs(encoders.readLeft() - routeExec.moveStartLeft);
-                long dr = labs(encoders.readRight() - routeExec.moveStartRight);
-                long maxm = (dl > dr) ? dl : dr;
-                if (maxm >= routeExec.moveTargetPulses) {
-                    // Waypoint alcanzado, avanzar al siguiente
-                    motors.stop();
-                    Serial.print(F("Waypoint alcanzado. Total waypoints visitados: "));
-                    Serial.print(routeExec.currentPoint + 1);
-                    Serial.print(F("/"));
-                    Serial.println(routesCounts[routeExec.routeIndex]);
-                    routeExec.currentPoint++;
-                    // small pause before next waypoint
-                    delay(80);
-                    beginNextWaypoint();
-                }
-            }
-        }
-    }
+    // Ejecutar ruta (sistema basado en funciones, sin máquina de estados explícita)
+    executeRoute();
+
+    // ========================================
+    //     SEGUIMIENTO DE PARED
+    // ========================================
+    // Nota: El seguimiento de pared y las rutas son mutuamente excluyentes
+    if (wallFollow.active && !routeExec.active) {
 
     // ========================================
     //     SEGUIMIENTO DE PARED
@@ -1928,13 +1973,16 @@ void handleAutoTurn() {
                 // We completed the 180° after IDA: wait for confirmation to start return
                 routeExec.awaitingConfirm = true;
                 routeExec.waitingForReturnConfirm = true;
-                routeExec.state = ROUTE_WAITING;
+                routeExec.isTurning = false;
+                routeExec.isWaiting = true;
                 Serial.println(F("Giro de 180° completado. Esperando confirmación para iniciar retorno..."));
                 return;
             } else {
                 // We completed the 180° after RETORNO: finish route
                 routeExec.active = false;
-                routeExec.state = ROUTE_DONE;
+                routeExec.isWaiting = false;
+                routeExec.isTurning = false;
+                routeExec.isMoving = false;
                 Serial.println(F("Giro de 180° completado. Ruta y retorno finalizados. Listo para nueva ruta."));
                 return;
             }
@@ -2061,8 +2109,15 @@ void handleClient(WiFiClient client) {
     // Return route execution status JSON
     if (req.indexOf("GET /route_status") >= 0) {
         String json = "{";
+        // Calcular estado virtual para compatibilidad con API (basado en flags)
+        int virtualState = 0; // ROUTE_IDLE
+        if (routeExec.isWaiting) virtualState = 1; // ROUTE_WAITING
+        else if (routeExec.isTurning) virtualState = 2; // ROUTE_TURNING
+        else if (routeExec.isMoving) virtualState = 3; // ROUTE_MOVING
+        else if (!routeExec.active) virtualState = 4; // ROUTE_DONE
+        
         json += "\"active\":" + String(routeExec.active ? 1 : 0) + ",";
-        json += "\"state\":" + String((int)routeExec.state) + ",";
+        json += "\"state\":" + String(virtualState) + ",";
         json += "\"routeIndex\":" + String(routeExec.routeIndex) + ",";
         json += "\"direction\":" + String(routeExec.direction) + ",";
         json += "\"currentPoint\":" + String(routeExec.currentPoint) + ",";
@@ -2072,7 +2127,7 @@ void handleClient(WiFiClient client) {
         json += "\"obstacleActive\":" + String(routeExec.obstacleActive ? 1 : 0) + ",";
         json += "\"obstacleState\":" + String(routeExec.obstacleState) + ",";
         unsigned long remaining = 0;
-        if (routeExec.state == ROUTE_WAITING) {
+        if (routeExec.isWaiting) {
             unsigned long elapsed = millis() - routeExec.requestMillis;
             if (elapsed < routeExec.delayMs) remaining = routeExec.delayMs - elapsed;
         }
@@ -2088,7 +2143,7 @@ void handleClient(WiFiClient client) {
 
     // Confirm scheduled route start early: /confirm_route
     if (req.indexOf("GET /confirm_route") >= 0) {
-        if (routeExec.active && routeExec.state == ROUTE_WAITING && routeExec.awaitingConfirm) {
+        if (routeExec.active && routeExec.isWaiting && routeExec.awaitingConfirm) {
             // If we are waiting specifically to start the return, enable return mode
             if (routeExec.waitingForReturnConfirm) {
                 // Operator confirmed return: enable return mode and start return
