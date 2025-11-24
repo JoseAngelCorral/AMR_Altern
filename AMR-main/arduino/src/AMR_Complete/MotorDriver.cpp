@@ -25,25 +25,33 @@ void MotorDriver::moveForward(int speed) {
     // Limitar velocidad mínima y máxima
     speed = constrain(speed, MIN_SPEED, MAX_SPEED);
     
+    // Aplicar factor de compensación al motor derecho para corregir curva a la derecha
+    int rightSpeed = (int)round((float)speed * RIGHT_MOTOR_COMPENSATION);
+    rightSpeed = constrain(rightSpeed, 0, MAX_SPEED); // Asegurar que no exceda el máximo
+    
     // Motor izquierdo hacia adelante (LPWM activo - corregido)
     analogWrite(MOTOR_LEFT_RPWM, 0);       // PWM adelante = 0
     analogWrite(MOTOR_LEFT_LPWM, speed);   // PWM atrás
     
-    // Motor derecho hacia adelante (LPWM activo - corregido)
+    // Motor derecho hacia adelante (LPWM activo - corregido) con compensación
     analogWrite(MOTOR_RIGHT_RPWM, 0);      // PWM adelante = 0
-    analogWrite(MOTOR_RIGHT_LPWM, speed);  // PWM atrás
+    analogWrite(MOTOR_RIGHT_LPWM, rightSpeed);  // PWM atrás con compensación
 }
 
 void MotorDriver::moveBackward(int speed) {
     // Limitar velocidad mínima y máxima
     speed = constrain(speed, MIN_SPEED, MAX_SPEED);
     
+    // Aplicar factor de compensación al motor derecho para corregir curva a la derecha
+    int rightSpeed = (int)round((float)speed * RIGHT_MOTOR_COMPENSATION);
+    rightSpeed = constrain(rightSpeed, 0, MAX_SPEED); // Asegurar que no exceda el máximo
+    
     // Motor izquierdo hacia atrás (RPWM activo - corregido)
     analogWrite(MOTOR_LEFT_RPWM, speed);   // PWM adelante
     analogWrite(MOTOR_LEFT_LPWM, 0);       // PWM atrás = 0
     
-    // Motor derecho hacia atrás (RPWM activo - corregido)
-    analogWrite(MOTOR_RIGHT_RPWM, speed);  // PWM adelante
+    // Motor derecho hacia atrás (RPWM activo - corregido) con compensación
+    analogWrite(MOTOR_RIGHT_RPWM, rightSpeed);  // PWM adelante con compensación
     analogWrite(MOTOR_RIGHT_LPWM, 0);      // PWM atrás = 0
 }
 
@@ -140,15 +148,20 @@ void MotorDriver::setRightMotor(int speed) {
     // Limitar velocidad entre -255 y 255
     speed = constrain(speed, -MAX_SPEED, MAX_SPEED);
     
-    if (speed > 0) {
+    // Aplicar factor de compensación para corregir curva a la derecha
+    int compensatedSpeed = (int)round((float)speed * RIGHT_MOTOR_COMPENSATION);
+    compensatedSpeed = constrain(compensatedSpeed, -MAX_SPEED, MAX_SPEED);
+    
+    if (compensatedSpeed > 0) {
         // Hacia adelante - usar LPWM (corregido)
-        if (speed < MIN_SPEED) speed = MIN_SPEED;
+        int finalSpeed = compensatedSpeed;
+        if (finalSpeed < MIN_SPEED && finalSpeed > 0) finalSpeed = MIN_SPEED;
         analogWrite(MOTOR_RIGHT_RPWM, 0);
-        analogWrite(MOTOR_RIGHT_LPWM, speed);
-    } else if (speed < 0) {
+        analogWrite(MOTOR_RIGHT_LPWM, finalSpeed);
+    } else if (compensatedSpeed < 0) {
         // Hacia atrás - usar RPWM (corregido)
-        int absSpeed = -speed;
-        if (absSpeed < MIN_SPEED) absSpeed = MIN_SPEED;
+        int absSpeed = -compensatedSpeed;
+        if (absSpeed < MIN_SPEED && absSpeed > 0) absSpeed = MIN_SPEED;
         analogWrite(MOTOR_RIGHT_RPWM, absSpeed);
         analogWrite(MOTOR_RIGHT_LPWM, 0);
     } else {
