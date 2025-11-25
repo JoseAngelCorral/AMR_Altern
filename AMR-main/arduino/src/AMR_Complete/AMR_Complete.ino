@@ -466,15 +466,33 @@ const char routesPageHTML[] PROGMEM = R"rawliteral(
                 const r = await fetch(STATUS_URL, { cache: 'no-store' });
                 if (!r.ok) throw new Error('Status HTTP '+r.status);
                 const j = await r.json();
+                
+                // Check for obstacle pause - change background to red
+                if (j.obstaclePaused) {
+                    document.body.style.background = '#8B0000';
+                    const secs = Math.ceil((j.obstacleRemainingMs || 0) / 1000);
+                    statusPre.textContent = `⚠️ OBSTÁCULO DETECTADO - Esperando ${secs}s para reanudar...`;
+                    statusPre.style.background = '#ff0000';
+                    statusPre.style.color = '#fff';
+                } else {
+                    document.body.style.background = '#0b0b0b';
+                    statusPre.style.background = '#0e0e0e';
+                    statusPre.style.color = '#cfcfcf';
+                }
+                
                 // update state
                 if (j.active) {
-                            statusPre.textContent = `Active. state:${j.state} route:${j.routeIndex} pt:${j.currentPoint} awaitingConfirm:${j.awaitingConfirm} obstacle:${j.obstacleActive?1:0} obState:${j.obstacleState}`;
+                    if (!j.obstaclePaused) {
+                        statusPre.textContent = `Activo. Ruta:${j.routeIndex} Waypoint:${j.currentPoint} ${j.awaitingConfirm?'(Esperando confirmación)':''}`;
+                    }
                     // disable start buttons while active
                     document.getElementById('startIda').disabled = true;
                     document.getElementById('startRet').disabled = true;
                     document.getElementById('stopRoute').disabled = false;
                 } else {
-                    statusPre.textContent = 'Inactivo';
+                    if (!j.obstaclePaused) {
+                        statusPre.textContent = 'Inactivo';
+                    }
                     document.getElementById('startIda').disabled = false;
                     document.getElementById('startRet').disabled = false;
                     document.getElementById('stopRoute').disabled = true;
@@ -778,16 +796,9 @@ struct RouteExecution {
     bool waitingForReturnConfirm = false; // waiting confirmation after finishing ida
     bool returnModeActive = false; // true when executing return leg
     bool postFinishTurn = false; // indicates we've started the final 180° turn
-    // Obstacle avoidance state
-    bool obstacleActive = false; // flag indicating avoidance in progress
-    int obstacleSide = 0; // +1 = left, -1 = right (chosen side to go around)
-    int obstacleState = 0; // 0=idle,1=TURN,2=FORWARD,3=TURNBACK,4=CROSS_FORWARD,5=DONE
-    long obstacleMoveStartLeft = 0;
-    long obstacleMoveStartRight = 0;
-    long obstacleMoveTargetPulses = 0;
-    long obstacleMoveMaxPulses = 0; // safety cap if sensor never clears
-    int obstacleProbePin = -1; // pin to sample for clearance (opposite sensor)
-    bool obstacleSawDuringAdvance = false; // true if lateral sensor saw obstacle during FORWARD state
+    // Obstacle pause state (simple: stop, wait 10s, resume)
+    bool obstaclePaused = false; // true when obstacle detected and waiting
+    unsigned long obstaclePauseStart = 0; // timestamp when pause started
     // movement bookkeeping
     long moveStartLeft = 0;
     long moveStartRight = 0;
@@ -909,167 +920,58 @@ bool executeTurn() {
     return false;
 }
 
-// Ejecuta movimiento hacia waypoint con evasión de obstáculos
+// Ejecuta movimiento hacia waypoint con pausa por obstáculo
 // Retorna true cuando el movimiento ha terminado
 bool executeMove() {
     if (!routeExec.isMoving) return true;
     
-    // First, check for obstacles using IR sensors
+    const unsigned long OBSTACLE_PAUSE_MS = 10000; // 10 segundos de espera
+    
+    // Si está en pausa por obstáculo, verificar si pasaron los 10 segundos
+    if (routeExec.obstaclePaused) {
+        unsigned long elapsed = millis() - routeExec.obstaclePauseStart;
+        if (elapsed >= OBSTACLE_PAUSE_MS) {
+            // Tiempo de espera completado, reanudar
+            routeExec.obstaclePaused = false;
+            Serial.println(F("Obstacle pause finished. Resuming route..."));
+            motors.moveForward();
+        }
+        return false; // Aún en pausa
+    }
+    
+    // Verificar sensores frontales para detectar obstáculo
     float dFL = distanciaSamples(IR_FRONT_LEFT_PIN, 3, NULL);
     float dFR = distanciaSamples(IR_FRONT_RIGHT_PIN, 3, NULL);
     float frontMin = min(dFL, dFR);
     
-    // Obstacle detection and avoidance logic - IMMEDIATE (no waiting period)
-    if (!routeExec.obstacleActive && frontMin <= OBSTACLE_THRESHOLD_CM) {
-        // Obstacle detected: trigger avoidance immediately
+    // Si se detecta obstáculo, detener y esperar 10 segundos
+    if (frontMin <= OBSTACLE_THRESHOLD_CM) {
         motors.stop();
-        
-        // Read lateral sensors to decide which side to evade
-        float dL = distanciaSamples(IR_LEFT_SIDE_PIN, 3, NULL);
-        float dR = distanciaSamples(IR_RIGHT_SIDE_PIN, 3, NULL);
-        
-        // Decide side according to rule:
-        // - If both lateral sensors are free (no proximity), prefer RIGHT.
-        // - If left lateral detects proximity, avoid on the RIGHT (opposite side).
-        // - If right lateral detects proximity, avoid on the LEFT (opposite side).
-        // - If both lateral detect proximity, fallback to side with more space.
-        const float lateralOccupiedCm = OBSTACLE_THRESHOLD_CM;
-        bool leftOccupied = dL <= lateralOccupiedCm;
-        bool rightOccupied = dR <= lateralOccupiedCm;
-        
-        if (!leftOccupied && !rightOccupied) {
-            // both free -> prefer right-hand avoidance
-            routeExec.obstacleSide = -1; // -1 = right
-        } else if (leftOccupied && !rightOccupied) {
-            // left is occupied -> go right (opposite)
-            routeExec.obstacleSide = -1;
-        } else if (rightOccupied && !leftOccupied) {
-            // right is occupied -> go left (opposite)
-            routeExec.obstacleSide = +1;
-        } else {
-            // both occupied -> fallback to side with more space
-            routeExec.obstacleSide = (dL > dR) ? +1 : -1;
-        }
-        
-        routeExec.obstacleActive = true;
-        routeExec.obstacleState = 1; // TURN
-        routeExec.obstacleSawDuringAdvance = false; // reset for new avoidance
-        
-        // Probe pin: check the opposite lateral sensor while advancing (detect when object is cleared)
-        routeExec.obstacleProbePin = (routeExec.obstacleSide == +1) ? IR_RIGHT_SIDE_PIN : IR_LEFT_SIDE_PIN;
-        float pulsesF = (AVOID_MAX_STEP_CM / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
-        routeExec.obstacleMoveMaxPulses = (long)(pulsesF + 0.5f);
-        
-        startAutoTurn(routeExec.obstacleSide * 90.0f);
-        Serial.print(F("Obstacle detected! Immediate evasion. side=")); Serial.print(routeExec.obstacleSide);
-        Serial.print(F(" frontMin=")); Serial.print(frontMin);
-        Serial.print(F(" dL=")); Serial.print(dL);
-        Serial.print(F(" dR=")); Serial.println(dR);
-        
-    } else if (routeExec.obstacleActive) {
-        // Obstacle avoidance in progress
-        if (routeExec.obstacleState == 2) {
-            // FORWARD: moving laterally to pass the obstacle
-            // Strategy: Always advance AVOID_STEP_CM, then check if sensor SEES obstacle.
-            // If sensor sees obstacle, keep advancing until it clears.
-            // If sensor never sees obstacle, advance the minimum and proceed.
-            long dl = labs(encoders.readLeft() - routeExec.obstacleMoveStartLeft);
-            long dr = labs(encoders.readRight() - routeExec.obstacleMoveStartRight);
-            long maxm = (dl > dr) ? dl : dr;
-            
-            bool minDistanceReached = (maxm >= routeExec.obstacleMoveTargetPulses);
-            bool maxDistanceReached = (maxm >= routeExec.obstacleMoveMaxPulses);
-            
-            // Check lateral sensor
-            float probeDist = distanciaSamples(routeExec.obstacleProbePin, 3, NULL);
-            bool sensorSeesObstacle = (probeDist < OBSTACLE_THRESHOLD_CM);
-            bool sensorClear = (probeDist >= (OBSTACLE_THRESHOLD_CM + AVOID_CLEAR_MARGIN_CM));
-            
-            // Track if we've ever seen the obstacle with the lateral sensor
-            if (sensorSeesObstacle) {
-                routeExec.obstacleSawDuringAdvance = true;
-            }
-            
-            // Decision logic:
-            // - If we saw the obstacle and now it's clear: done (passed the obstacle)
-            // - If we never saw the obstacle but reached min distance: done (obstacle not visible to lateral)
-            // - If max distance reached: done (safety limit)
-            bool canFinish = false;
-            if (routeExec.obstacleSawDuringAdvance && sensorClear) {
-                canFinish = true;
-                Serial.println(F("Avoidance: obstacle seen and now cleared"));
-            } else if (!routeExec.obstacleSawDuringAdvance && minDistanceReached) {
-                canFinish = true;
-                Serial.println(F("Avoidance: min distance reached, obstacle not visible to lateral sensor"));
-            } else if (maxDistanceReached) {
-                canFinish = true;
-                Serial.println(F("Avoidance: max distance reached (safety)"));
-            }
-            
-            if (canFinish) {
-                motors.stop();
-                routeExec.obstacleSawDuringAdvance = false; // reset for next avoidance
-                Serial.print(F("Avoidance forward done. pulses=")); Serial.print(maxm);
-                Serial.print(F(" probeDist=")); Serial.println(probeDist);
-                routeExec.obstacleState = 3; // TURNBACK
-                startAutoTurn(-routeExec.obstacleSide * 90.0f);
-            }
-            // else: keep moving forward
-            
-        } else if (routeExec.obstacleState == 4) {
-            // CROSS_FORWARD: crossing forward to return to path
-            long dl = labs(encoders.readLeft() - routeExec.obstacleMoveStartLeft);
-            long dr = labs(encoders.readRight() - routeExec.obstacleMoveStartRight);
-            long maxm = (dl > dr) ? dl : dr;
-            
-            if (maxm >= routeExec.obstacleMoveTargetPulses) {
-                motors.stop();
-                routeExec.obstacleState = 5; // DONE
-                routeExec.obstacleActive = false;
-                Serial.println(F("Obstacle avoidance finished."));
-                
-                // Recompute movement towards same waypoint
-                float dx = routeExec.targetX - odometry.getX();
-                float dy = routeExec.targetY - odometry.getY();
-                float dist = sqrtf(dx*dx + dy*dy);
-                float pulsesF = (dist / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
-                routeExec.moveTargetPulses = (long)(pulsesF + 0.5f);
-                routeExec.moveStartLeft = encoders.readLeft();
-                routeExec.moveStartRight = encoders.readRight();
-                
-                if (routeExec.moveTargetPulses <= 0) {
-                    Serial.println(F("Waypoint alcanzado después de evasión. Avanzando al siguiente..."));
-                    routeExec.currentPoint++;
-                    beginNextWaypoint();
-                    routeExec.isMoving = false;
-                    return true;
-                } else {
-                    Serial.print(F("Continuando hacia waypoint desde nueva posición: "));
-                    Serial.print(routeExec.moveTargetPulses);
-                    Serial.println(F(" pulsos"));
-                    motors.moveForward();
-                }
-            }
-        }
-    } else {
-        // Normal movement completion check (no obstacle active)
-        long dl = labs(encoders.readLeft() - routeExec.moveStartLeft);
-        long dr = labs(encoders.readRight() - routeExec.moveStartRight);
-        long maxm = (dl > dr) ? dl : dr;
-        if (maxm >= routeExec.moveTargetPulses) {
-            // Waypoint alcanzado
-            motors.stop();
-            Serial.print(F("Waypoint alcanzado. Total waypoints visitados: "));
-            Serial.print(routeExec.currentPoint + 1);
-            Serial.print(F("/"));
-            Serial.println(routesCounts[routeExec.routeIndex]);
-            routeExec.currentPoint++;
-            delay(80);
-            beginNextWaypoint();
-            routeExec.isMoving = false;
-            return true;
-        }
+        routeExec.obstaclePaused = true;
+        routeExec.obstaclePauseStart = millis();
+        Serial.print(F("OBSTACLE DETECTED! Stopping for 10 seconds. frontMin="));
+        Serial.println(frontMin);
+        return false;
     }
+    
+    // Movimiento normal - verificar si llegó al waypoint
+    long dl = labs(encoders.readLeft() - routeExec.moveStartLeft);
+    long dr = labs(encoders.readRight() - routeExec.moveStartRight);
+    long maxm = (dl > dr) ? dl : dr;
+    if (maxm >= routeExec.moveTargetPulses) {
+        // Waypoint alcanzado
+        motors.stop();
+        Serial.print(F("Waypoint alcanzado. Total waypoints visitados: "));
+        Serial.print(routeExec.currentPoint + 1);
+        Serial.print(F("/"));
+        Serial.println(routesCounts[routeExec.routeIndex]);
+        routeExec.currentPoint++;
+        delay(80);
+        beginNextWaypoint();
+        routeExec.isMoving = false;
+        return true;
+    }
+    
     return false;
 }
 
@@ -2027,49 +1929,6 @@ void handleAutoTurn() {
             }
         }
 
-        // If an obstacle avoidance sequence was waiting for this turn to finish,
-        // advance the obstacle state machine: after the initial TURN we should
-        // start the forward step; after the TURNBACK we should start the crossing step.
-        if (routeExec.obstacleActive) {
-            if (routeExec.obstacleState == 1) {
-                // Completed initial 90° turn; start forward step
-                routeExec.obstacleState = 2; // FORWARD
-                // compute pulses for AVOID_STEP_CM
-                float pulsesF = (AVOID_STEP_CM / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
-                routeExec.obstacleMoveTargetPulses = (long)(pulsesF + 0.5f);
-                routeExec.obstacleMoveStartLeft = encoders.readLeft();
-                routeExec.obstacleMoveStartRight = encoders.readRight();
-                motors.moveForward();
-                Serial.print(F("Avoidance: forward step pulses:")); Serial.println(routeExec.obstacleMoveTargetPulses);
-            } else if (routeExec.obstacleState == 3) {
-                // Completed turn back toward original heading.
-                // If the probe (opposite lateral) sensor is clear, start the crossing forward step.
-                // If it's still seeing the obstacle, instead of waiting stationary, perform
-                // another lateral advance (another FORWARD step) to try to pass the object.
-                float probeDist = distanciaSamples(routeExec.obstacleProbePin, 3, NULL);
-                if (probeDist >= (OBSTACLE_THRESHOLD_CM + AVOID_CLEAR_MARGIN_CM)) {
-                    // probe side is clear -> start crossing forward
-                    routeExec.obstacleState = 4; // CROSS_FORWARD
-                    float pulsesF = (AVOID_STEP_CM / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
-                    routeExec.obstacleMoveTargetPulses = (long)(pulsesF + 0.5f);
-                    routeExec.obstacleMoveStartLeft = encoders.readLeft();
-                    routeExec.obstacleMoveStartRight = encoders.readRight();
-                    motors.moveForward();
-                    Serial.print(F("Avoidance: cross forward pulses:")); Serial.println(routeExec.obstacleMoveTargetPulses);
-                } else {
-                    // Still blocked: perform another lateral advance step to try to bypass
-                    routeExec.obstacleState = 2; // FORWARD (another step)
-                    float pulsesF = (AVOID_STEP_CM / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
-                    routeExec.obstacleMoveTargetPulses = (long)(pulsesF + 0.5f);
-                    routeExec.obstacleMoveStartLeft = encoders.readLeft();
-                    routeExec.obstacleMoveStartRight = encoders.readRight();
-                    motors.moveForward();
-                    Serial.print(F("Avoidance: obstacle still present after turnback; advancing another step pulses:")); Serial.println(routeExec.obstacleMoveTargetPulses);
-                }
-            }
-            return;
-        }
-
         return;
     }
 
@@ -2180,8 +2039,14 @@ void handleClient(WiFiClient client) {
         json += "\"awaitingConfirm\":" + String(routeExec.awaitingConfirm ? 1 : 0) + ",";
         json += "\"targetX\":" + String(routeExec.targetX,3) + ",";
         json += "\"targetY\":" + String(routeExec.targetY,3) + ",";
-        json += "\"obstacleActive\":" + String(routeExec.obstacleActive ? 1 : 0) + ",";
-        json += "\"obstacleState\":" + String(routeExec.obstacleState) + ",";
+        json += "\"obstaclePaused\":" + String(routeExec.obstaclePaused ? 1 : 0) + ",";
+        // Remaining obstacle pause time
+        unsigned long obstacleRemaining = 0;
+        if (routeExec.obstaclePaused) {
+            unsigned long elapsed = millis() - routeExec.obstaclePauseStart;
+            if (elapsed < 10000) obstacleRemaining = 10000 - elapsed;
+        }
+        json += "\"obstacleRemainingMs\":" + String(obstacleRemaining) + ",";
         unsigned long remaining = 0;
         if (routeExec.isWaiting) {
             unsigned long elapsed = millis() - routeExec.requestMillis;
