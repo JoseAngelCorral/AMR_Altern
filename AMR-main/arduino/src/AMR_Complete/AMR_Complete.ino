@@ -271,14 +271,6 @@ const char routesPageHTML[] PROGMEM = R"rawliteral(
                 <button id="confirmStart" disabled>Confirmar inicio</button>
                 <div style="padding:6px; background:#222; color:#0f0; border-radius:4px; text-align:center;">Cuenta regresiva: <span id="countdown">--</span></div>
             </div>
-            <div style="margin-top:12px; padding-top:12px; border-top:1px solid #333;">
-                <div style="text-align:center; color:#7CFC00; margin-bottom:8px; font-size:0.9em;">Seguimiento de Pared</div>
-                <div class="controls">
-                    <button id="wallFollowLeft" style="background:#444; color:#7CFC00;">Seguir Pared Izquierda</button>
-                    <button id="wallFollowRight" style="background:#444; color:#7CFC00;">Seguir Pared Derecha</button>
-                    <button id="stopWallFollow" style="background:#666; color:#fff;">Detener Seguimiento</button>
-                </div>
-            </div>
             
         </div>
     </div>
@@ -302,8 +294,6 @@ const char routesPageHTML[] PROGMEM = R"rawliteral(
         const STOP_URL = '/stop_route';
         const STATUS_URL = '/route_status';
         const CONFIRM_URL = '/confirm_route';
-        const WALL_FOLLOW_URL = '/wall_follow';
-        const STOP_WALL_FOLLOW_URL = '/stop_wall_follow';
 
         let routes = [];
         const routeSelect = document.getElementById('routeSelect');
@@ -440,25 +430,6 @@ const char routesPageHTML[] PROGMEM = R"rawliteral(
         confirmBtn.addEventListener('click', ()=> confirmStart());
         
         // Seguimiento de pared
-        async function startWallFollow(side) {
-            try {
-                const r = await fetch(`${WALL_FOLLOW_URL}?side=${side}`);
-                if (!r.ok) throw new Error('HTTP '+r.status);
-                statusPre.textContent = `Seguimiento de pared ${side === 'left' ? 'izquierda' : 'derecha'} iniciado`;
-            } catch(e) { statusPre.textContent = 'Error: '+e; }
-        }
-        
-        async function stopWallFollow() {
-            try {
-                const r = await fetch(STOP_WALL_FOLLOW_URL);
-                if (!r.ok) throw new Error('HTTP '+r.status);
-                statusPre.textContent = 'Seguimiento de pared detenido';
-            } catch(e) { statusPre.textContent = 'Error stop: '+e; }
-        }
-        
-        document.getElementById('wallFollowLeft').addEventListener('click', ()=> startWallFollow('left'));
-        document.getElementById('wallFollowRight').addEventListener('click', ()=> startWallFollow('right'));
-        document.getElementById('stopWallFollow').addEventListener('click', ()=> stopWallFollow());
 
         // Poll route status and update UI
         async function pollStatus(){
@@ -815,22 +786,6 @@ struct RouteExecution {
     float targetY = 0.0f;
 } routeExec;
 
-// ========================================
-//     SEGUIMIENTO DE PARED
-// ========================================
-// Estados: 0=idle, 1=following, 2=turning, 3=stopped (all walls detected)
-struct WallFollow {
-    bool active = false;
-    int side = 0; // +1 = izquierda, -1 = derecha
-    int state = 0; // 0=idle, 1=following, 2=turning, 3=stopped
-    unsigned long allWallsDetectedStart = 0; // timestamp cuando se detectaron todas las paredes
-} wallFollow;
-
-const float WALL_FOLLOW_THRESHOLD_CM = 30.0f; // distancia para considerar pared detectada
-const unsigned long ALL_WALLS_TIMEOUT_MS = 10000; // 10 segundos para finalizar si todas las paredes detectadas
-const int WALL_FOLLOW_SPEED = 100; // velocidad base para seguimiento de pared
-const int WALL_FOLLOW_TURN_SPEED = 80; // velocidad para giros durante seguimiento
-
 // Helper: stop/abort execution
 void stopRouteExecution() {
     if (!routeExec.active) return;
@@ -840,31 +795,6 @@ void stopRouteExecution() {
     routeExec.isMoving = false;
     motors.stop();
     Serial.println(F("Route execution aborted"));
-}
-
-// Helper: stop wall following
-void stopWallFollowing() {
-    if (!wallFollow.active) return;
-    wallFollow.active = false;
-    wallFollow.state = 0;
-    motors.stop();
-    Serial.println(F("Wall following stopped"));
-}
-
-// Helper: start wall following
-void startWallFollowing(int side) {
-    if (wallFollow.active) stopWallFollowing();
-    // Detener cualquier ruta activa antes de iniciar seguimiento de pared
-    if (routeExec.active) {
-        stopRouteExecution();
-        Serial.println(F("Ruta detenida para iniciar seguimiento de pared."));
-    }
-    wallFollow.active = true;
-    wallFollow.side = side;
-    wallFollow.state = 1; // following
-    wallFollow.allWallsDetectedStart = 0;
-    Serial.print(F("Wall following started: "));
-    Serial.println(side == 1 ? F("LEFT") : F("RIGHT"));
 }
 
 // helper to normalize angle to [-180,180]
@@ -1432,157 +1362,6 @@ void loop() {
 
     // Ejecutar ruta (sistema basado en funciones, sin máquina de estados explícita)
     executeRoute();
-
-    // ========================================
-    //     SEGUIMIENTO DE PARED
-    // ========================================
-    // Nota: El seguimiento de pared y las rutas son mutuamente excluyentes
-    if (wallFollow.active && !routeExec.active) {
-        // Leer sensores
-        float dFL = distanciaSamples(IR_FRONT_LEFT_PIN, 3, NULL);
-        float dFR = distanciaSamples(IR_FRONT_RIGHT_PIN, 3, NULL);
-        float dL = distanciaSamples(IR_LEFT_SIDE_PIN, 3, NULL);
-        float dR = distanciaSamples(IR_RIGHT_SIDE_PIN, 3, NULL);
-        
-        // Determinar qué sensores están detectando pared
-        bool frontLeftWall = dFL <= WALL_FOLLOW_THRESHOLD_CM;
-        bool frontRightWall = dFR <= WALL_FOLLOW_THRESHOLD_CM;
-        bool leftWall = dL <= WALL_FOLLOW_THRESHOLD_CM;
-        bool rightWall = dR <= WALL_FOLLOW_THRESHOLD_CM;
-        bool allWalls = frontLeftWall && frontRightWall && leftWall && rightWall;
-        
-        // Sensor lateral de la pared que estamos siguiendo
-        float followSideDist = (wallFollow.side == 1) ? dL : dR;
-        bool followSideWall = followSideDist <= WALL_FOLLOW_THRESHOLD_CM;
-        
-        // Sensor lateral opuesto a la pared que estamos siguiendo
-        float oppositeSideDist = (wallFollow.side == 1) ? dR : dL;
-        bool oppositeSideWall = oppositeSideDist <= WALL_FOLLOW_THRESHOLD_CM;
-        
-        // Sensor frontal (mínimo de ambos frontales)
-        float frontMin = (dFL < dFR) ? dFL : dFR;
-        bool frontWall = frontMin <= WALL_FOLLOW_THRESHOLD_CM;
-        
-        if (wallFollow.state == 3) {
-            // Estado: detenido (todas las paredes detectadas)
-            if (allWalls) {
-                // Verificar timeout de 10 segundos
-                if (wallFollow.allWallsDetectedStart == 0) {
-                    wallFollow.allWallsDetectedStart = millis();
-                } else if (millis() - wallFollow.allWallsDetectedStart >= ALL_WALLS_TIMEOUT_MS) {
-                    Serial.println(F("Timeout: todas las paredes detectadas por más de 10s. Finalizando seguimiento."));
-                    stopWallFollowing();
-                }
-            } else {
-                // Ya no todas las paredes detectadas, volver a seguir
-                wallFollow.state = 1;
-                wallFollow.allWallsDetectedStart = 0;
-                Serial.println(F("Reanudando seguimiento de pared."));
-            }
-        } else if (wallFollow.state == 2) {
-            // Estado: girando (esperando que termine el giro automático)
-            if (!turningInProgress) {
-                // Giro completado, volver a seguir pared
-                wallFollow.state = 1;
-                Serial.println(F("Giro completado. Reanudando seguimiento."));
-            }
-        } else {
-            // Estado: siguiendo pared (state == 1)
-            
-            // Detectar esquina externa: frontales NO detectan pared pero el lateral seguido deja de detectar
-            // En este caso, girar 90° hacia el exterior (hacia donde estaba la pared seguida) para seguirla
-            if (!frontLeftWall && !frontRightWall && !followSideWall) {
-                wallFollow.state = 2; // turning
-                motors.stop();
-                // Girar hacia el exterior (hacia la pared que seguíamos) para seguirla
-                startAutoTurn(90.0f * wallFollow.side);
-                Serial.println(F("Esquina externa detectada: lateral seguido perdió pared. Girando 90° hacia exterior para seguir pared."));
-            }
-            
-            // Verificar si todas las paredes están detectadas
-            if (allWalls) {
-                motors.stop();
-                wallFollow.state = 3; // stopped
-                wallFollow.allWallsDetectedStart = millis();
-                Serial.println(F("Todas las paredes detectadas. Deteniendo seguimiento."));
-            } else if (frontWall) {
-                // Hay pared al frente, girar
-                wallFollow.state = 2; // turning
-                motors.stop();
-                // Girar hacia el lado opuesto a la pared que seguimos (alejarse de la pared seguida)
-                startAutoTurn(-90.0f * wallFollow.side);
-                Serial.println(F("Pared al frente detectada. Girando..."));
-            } else {
-                // Seguir la pared ajustando velocidad según distancia
-                // Control proporcional: más cerca = más lento, más lejos = más rápido
-                int baseSpeed = WALL_FOLLOW_SPEED;
-                int leftSpeed = baseSpeed;
-                int rightSpeed = baseSpeed;
-                
-                // Calcular velocidad proporcional según distancia (15-25cm es rango ideal)
-                // Muy cerca (<15cm): reducir velocidad y alejarse
-                // Rango ideal (15-25cm): velocidad base
-                // Lejos (>25cm): aumentar velocidad y acercarse
-                float speedMultiplier = 1.0f;
-                float correctionFactor = 0.0f;
-                
-                if (followSideDist < 15.0f) {
-                    // Muy cerca: reducir velocidad proporcionalmente (mínimo 60% de base)
-                    speedMultiplier = 0.6f + (followSideDist / 15.0f) * 0.4f; // 0.6 a 1.0
-                    correctionFactor = -20.0f; // alejarse
-                } else if (followSideDist > 25.0f) {
-                    // Lejos: aumentar velocidad proporcionalmente (máximo 120% de base)
-                    speedMultiplier = 1.0f + ((followSideDist - 25.0f) / 25.0f) * 0.2f; // 1.0 a 1.2
-                    if (speedMultiplier > 1.2f) speedMultiplier = 1.2f;
-                    correctionFactor = 20.0f; // acercarse
-                }
-                
-                // Aplicar velocidad base ajustada
-                int adjustedSpeed = (int)(baseSpeed * speedMultiplier);
-                if (adjustedSpeed > 255) adjustedSpeed = 255;
-                if (adjustedSpeed < 60) adjustedSpeed = 60; // velocidad mínima
-                
-                // Aplicar corrección de dirección
-                if (wallFollow.side == 1) {
-                    // Siguiendo pared izquierda
-                    if (correctionFactor < 0) {
-                        // Alejarse: girar ligeramente a la derecha
-                        rightSpeed = adjustedSpeed + (int)correctionFactor;
-                        leftSpeed = adjustedSpeed;
-                    } else if (correctionFactor > 0) {
-                        // Acercarse: girar ligeramente a la izquierda
-                        leftSpeed = adjustedSpeed + (int)correctionFactor;
-                        rightSpeed = adjustedSpeed;
-                    } else {
-                        leftSpeed = adjustedSpeed;
-                        rightSpeed = adjustedSpeed;
-                    }
-                } else {
-                    // Siguiendo pared derecha
-                    if (correctionFactor < 0) {
-                        // Alejarse: girar ligeramente a la izquierda
-                        leftSpeed = adjustedSpeed + (int)correctionFactor;
-                        rightSpeed = adjustedSpeed;
-                    } else if (correctionFactor > 0) {
-                        // Acercarse: girar ligeramente a la derecha
-                        rightSpeed = adjustedSpeed + (int)correctionFactor;
-                        leftSpeed = adjustedSpeed;
-                    } else {
-                        leftSpeed = adjustedSpeed;
-                        rightSpeed = adjustedSpeed;
-                    }
-                }
-                
-                // Asegurar límites PWM
-                if (leftSpeed > 255) leftSpeed = 255;
-                if (leftSpeed < 60) leftSpeed = 60;
-                if (rightSpeed > 255) rightSpeed = 255;
-                if (rightSpeed < 60) rightSpeed = 60;
-                
-                motors.setBothMotors(leftSpeed, rightSpeed);
-            }
-        }
-    }
 
     // Si estamos en modo impresión de tics mientras avanzamos (comando 'W')
     if (printTicksWhileMoving && millis() - lastTickPrintMillis >= TICK_PRINT_INTERVAL) {
@@ -2173,28 +1952,6 @@ void handleClient(WiFiClient client) {
     if (req.indexOf("GET /stop_route") >= 0) {
         stopRouteExecution();
         client.println(F("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nSTOPPED"));
-        return;
-    }
-
-    // Start wall following: /wall_follow?side=left|right
-    if (req.indexOf("GET /wall_follow") >= 0) {
-        int sideIdx = req.indexOf("side=");
-        if (sideIdx >= 0) {
-            sideIdx += 5;
-            String sideStr = req.substring(sideIdx, sideIdx + 5);
-            int side = (sideStr.indexOf("left") >= 0) ? 1 : -1;
-            startWallFollowing(side);
-            client.println(F("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nWALL_FOLLOW_STARTED"));
-        } else {
-            client.println(F("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nMISSING_SIDE"));
-        }
-        return;
-    }
-
-    // Stop wall following: /stop_wall_follow
-    if (req.indexOf("GET /stop_wall_follow") >= 0) {
-        stopWallFollowing();
-        client.println(F("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nWALL_FOLLOW_STOPPED"));
         return;
     }
 
