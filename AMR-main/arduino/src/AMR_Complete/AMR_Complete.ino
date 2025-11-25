@@ -792,6 +792,8 @@ struct RouteExecution {
     bool obstacleClearing = false; // true when sensor stopped detecting, advancing margin
     long obstacleClearStartLeft = 0; // encoder position when clearing started
     long obstacleClearStartRight = 0;
+    bool obstacleSawFrontDuringCross = false; // true if lateral sensor saw obstacle during CROSS_FORWARD
+    bool obstacleCrossingClearing = false; // true when lateral cleared during cross, advancing margin
     // movement bookkeeping
     long moveStartLeft = 0;
     long moveStartRight = 0;
@@ -959,6 +961,8 @@ bool executeMove() {
         routeExec.obstacleState = 1; // TURN
         routeExec.obstacleSawDuringAdvance = false; // reset for new avoidance
         routeExec.obstacleClearing = false; // reset clearing mode
+        routeExec.obstacleSawFrontDuringCross = false; // reset for cross phase
+        routeExec.obstacleCrossingClearing = false; // reset cross clearing
         
         // Si gira a la derecha (side=-1), verifica el sensor izquierdo; si gira a la izquierda (side=+1), verifica el derecho.
         routeExec.obstacleProbePin = (routeExec.obstacleSide == -1) ? IR_LEFT_SIDE_PIN : IR_RIGHT_SIDE_PIN;
@@ -1061,8 +1065,8 @@ bool executeMove() {
             long dr = labs(encoders.readRight() - routeExec.obstacleMoveStartRight);
             long maxm = (dl > dr) ? dl : dr;
             
-            // Calcular pulsos para 10cm de avance inicial
-            const float CROSS_INITIAL_CM = 10.0f;
+            // Calcular pulsos para 15cm de avance inicial
+            const float CROSS_INITIAL_CM = 15.0f;
             float initialPulsesF = (CROSS_INITIAL_CM / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
             long initialPulses = (long)(initialPulsesF + 0.5f);
             
