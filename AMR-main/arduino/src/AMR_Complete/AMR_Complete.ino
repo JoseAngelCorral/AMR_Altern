@@ -99,7 +99,7 @@ int IR_THRESHOLD = 150;            // umbral por defecto (0-255). Ajustar por ca
 // Obstacle avoidance parameters
 const float OBSTACLE_THRESHOLD_CM = 30.0f; // if front distance below this, consider obstacle
 const float AVOID_STEP_CM = 30.0f; // how far to advance when circumventing (per step)
-const float AVOID_CLEAR_MARGIN_CM = 8.0f; // extra margin to consider object cleared
+const float AVOID_CLEAR_MARGIN_CM = 15.0f; // extra margin to consider object cleared (30+15=45cm threshold)
 const float AVOID_MAX_STEP_CM = 200.0f; // maximum allowed advance during avoidance (safety)
 
 // Estructura para devolver lecturas
