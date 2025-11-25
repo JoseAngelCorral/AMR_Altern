@@ -7,9 +7,8 @@ Sistema completo de control para robot móvil autónomo basado en Arduino Uno (o
 ### Características Principales
 
 - ✅ **Navegación Automática**: Sistema de rutas predefinidas con waypoints
-- ✅ **Evasión de Obstáculos**: Sistema inteligente con confirmación de 2 segundos
-- ✅ **Seguimiento de Pared**: Modo automático para seguir pared izquierda o derecha
-- ✅ **Máquina de Estados Robusta**: Control preciso de ejecución de rutas
+- ✅ **Detección de Obstáculos**: Pausa automática con feedback visual en UI (pantalla roja)
+- ✅ **Sistema de Estados Robusto**: Control preciso de ejecución de rutas
 - ✅ **Interfaz Web Dashboard**: Visualización en tiempo real con gráficos
 - ✅ **Control PID de Velocidad**: Sistema opcional con interpolación de encoders
 - ✅ **Odometría Precisa**: Tracking de posición basado en encoders
@@ -85,8 +84,8 @@ El sistema incluye una interfaz web completa accesible cuando el robot está en 
 ### Características de la Interfaz de Rutas:
 - Selección de ruta y modo (Ida/Retorno)
 - Control de ejecución con delay configurable
-- **Seguimiento de Pared**: Botones para iniciar seguimiento de pared izquierda o derecha
-- Vista previa de waypoints (implementación futura)
+- **Indicador de obstáculos**: Pantalla roja con cuenta regresiva cuando se detecta obstáculo
+- Vista previa de waypoints
 
 ## ⌨️ Comandos Serie (115200 baudios)
 
@@ -134,100 +133,23 @@ El sistema de navegación implementa una máquina de estados con 5 estados princ
 - **Retorno**: Ejecuta la ruta en sentido inverso
 - **Confirmación**: Requiere confirmación del operador antes de iniciar retorno
 
-## 🚧 Sistema de Evasión de Obstáculos
+## 🚧 Sistema de Detección de Obstáculos
 
-### Características:
-- **Confirmación de 2 segundos**: Evita falsas alarmas con objetos transitorios
-- **Selección automática de lado**: Elige el lado con más espacio libre
-- **Máquina de estados de 5 fases**:
-  1. **TURN**: Giro inicial de 90° hacia el lado elegido
-  2. **FORWARD**: Avance lateral mientras se monitorea el sensor opuesto
-  3. **TURNBACK**: Giro de retorno de 90° hacia la dirección original
-  4. **CROSS_FORWARD**: Avance final para cruzar el obstáculo
-  5. **DONE**: Evasión completada, recalcula ruta hacia waypoint original
+### Comportamiento:
+Cuando se detecta un obstáculo durante la ejecución de una ruta:
+
+1. **Detección**: Los sensores frontales detectan obstáculo a menos de 30cm
+2. **Pausa**: El robot se detiene inmediatamente
+3. **Feedback Visual**: La pantalla de la UI se pone **ROJA**
+4. **Espera**: Se muestra mensaje "OBSTÁCULO DETECTADO"
+5. **Remoción Manual**: El operador retira el obstáculo físicamente
+6. **Cuenta Regresiva**: Una vez despejado, inicia cuenta de 10 segundos
+7. **Reanudación**: Después de 10 segundos sin obstáculo, continúa la ruta
+8. **UI Normal**: La pantalla regresa a su color normal
 
 ### Parámetros Configurables:
 - `OBSTACLE_THRESHOLD_CM = 30.0cm` - Distancia mínima para considerar obstáculo
-- `OBSTACLE_DETECTION_DELAY_MS = 2000ms` - Tiempo de confirmación
-- `AVOID_STEP_CM = 30.0cm` - Distancia de avance por paso
-- `AVOID_CLEAR_MARGIN_CM = 8.0cm` - Margen adicional para considerar objeto superado
-- `AVOID_MAX_STEP_CM = 200.0cm` - Límite de seguridad para avance máximo
-
-## 🧱 Sistema de Seguimiento de Pared
-
-### Características:
-- **Modos disponibles**: Seguimiento de pared izquierda o derecha
-- **Control automático de velocidad**: Ajusta velocidad proporcionalmente según distancia a la pared seguida
-- **Detección de topes**: Usa sensores frontales para detectar obstáculos y girar
-- **Manejo de esquinas externas**: Gira automáticamente 90° hacia el exterior cuando detecta esquina
-- **Detección completa**: Se detiene cuando todos los sensores (frontales + laterales) detectan pared
-- **Timeout automático**: Finaliza si todas las paredes se detectan por más de 10 segundos
-- **Modo independiente**: Completamente aislado de las rutas automáticas (no hay combinación entre ambos modos)
-
-### Control Automático de Velocidad:
-El sistema implementa un **control proporcional de velocidad** basado en la distancia a la pared seguida:
-
-- **Muy cerca (<15cm)**: Reduce velocidad a 60-100% de la base y se aleja ligeramente
-  - La velocidad es proporcional: más cerca = más lento
-  - Ajusta dirección para alejarse de la pared
-  
-- **Rango ideal (15-25cm)**: Mantiene velocidad base constante
-  - Velocidad óptima para seguimiento estable
-  
-- **Lejos (>25cm)**: Aumenta velocidad hasta 120% de la base y se acerca ligeramente
-  - La velocidad aumenta proporcionalmente con la distancia
-  - Ajusta dirección para acercarse a la pared
-
-**Ventajas**: Este sistema permite un seguimiento más suave y estable, adaptándose automáticamente a las condiciones del entorno sin intervención manual.
-
-### Manejo de Esquinas Externas:
-Cuando el robot llega a una **esquina externa** (la pared que sigue se aleja formando un ángulo de 90° hacia afuera):
-
-- **Condición detectada**: 
-  - Los sensores frontales **NO** detectan pared
-  - El sensor lateral que está siguiendo **deja de detectar** la pared seguida
-  
-- **Acción automática**:
-  - El robot realiza un **giro de 90° hacia el exterior** (hacia donde estaba la pared seguida)
-  - Esto permite continuar siguiendo la pared alrededor de la esquina
-  - El giro se realiza automáticamente sin necesidad de intervención
-
-**Ejemplo**: Si estás siguiendo una pared izquierda y llegas a una esquina donde la pared gira 90° hacia la izquierda, el sensor lateral izquierdo dejará de detectar la pared, pero no habrá pared al frente. El robot girará 90° hacia la izquierda para seguir la nueva dirección de la pared.
-
-### Estados del Sistema:
-1. **FOLLOWING**: Siguiendo la pared activamente
-2. **TURNING**: Realizando giro para evitar obstáculo frontal o seguir esquina externa
-3. **STOPPED**: Todas las paredes detectadas (esperando timeout o cambio de condiciones)
-
-### Condiciones de Finalización:
-El seguimiento de pared se detiene automáticamente cuando:
-- **Todas las paredes detectadas por más de 10 segundos**: Timeout automático
-- **Comando manual**: El usuario presiona "Detener Seguimiento" en la interfaz web
-- **Inicio de ruta automática**: Si se inicia una ruta, el seguimiento de pared se detiene automáticamente
-
-### Parámetros Configurables:
-- `WALL_FOLLOW_THRESHOLD_CM = 30.0cm` - Distancia para considerar pared detectada
-- `ALL_WALLS_TIMEOUT_MS = 10000ms` - Tiempo máximo con todas las paredes detectadas antes de finalizar
-- `WALL_FOLLOW_SPEED = 100` - Velocidad base PWM para seguimiento
-- `WALL_FOLLOW_TURN_SPEED = 80` - Velocidad PWM para giros durante seguimiento
-
-### Uso desde Interfaz Web:
-1. Acceder a la interfaz de rutas: `http://<robot_ip>/routes_ui`
-2. En la sección "Seguimiento de Pared", seleccionar:
-   - **Seguir Pared Izquierda**: Inicia seguimiento usando sensor lateral izquierdo
-   - **Seguir Pared Derecha**: Inicia seguimiento usando sensor lateral derecho
-   - **Detener Seguimiento**: Cancela el modo de seguimiento
-
-### Endpoints HTTP:
-- `GET /wall_follow?side=left|right` - Inicia seguimiento de pared
-- `GET /stop_wall_follow` - Detiene seguimiento de pared
-
-### Notas Importantes:
-- **Modos completamente independientes**: El seguimiento de pared y las rutas automáticas son **mutuamente excluyentes** y **completamente aislados**
-- **No hay combinación**: Es una opción O la otra, nunca ambas al mismo tiempo
-- **Al iniciar seguimiento de pared**: Cualquier ruta activa se detiene automáticamente
-- **Al iniciar una ruta**: Cualquier seguimiento de pared activo se detiene automáticamente
-- **Uso independiente**: El seguimiento de pared funciona de forma autónoma sin necesidad de tener una ruta programada
+- `OBSTACLE_PAUSE_DURATION_MS = 10000ms` - Tiempo de espera antes de reanudar
 
 ## ⚙️ Sistema PID de Velocidad
 
@@ -296,15 +218,14 @@ El código está organizado en secciones claras:
 2. **Configuración WiFi**: Access Point y HTML embebido (PROGMEM)
 3. **Definición de rutas**: Estructuras de datos para waypoints
 4. **Instancias globales**: motors, encoders, odometry
-5. **Máquina de estados**: RouteExecution con evasión de obstáculos
-6. **Seguimiento de pared**: Sistema WallFollow con estados y reanudación
-7. **Variables de control**: Timing, logging, flags
-8. **Sensores IR**: Lectura, conversión a distancia, detección
-9. **Setup**: Inicialización de hardware y WiFi
-10. **Loop principal**: Ejecución de tareas no bloqueantes
-11. **Procesamiento de comandos**: Interfaz serie
-12. **Giros automáticos**: Sistema basado en encoders
-13. **Servidor WiFi**: Dashboard y API HTTP
+5. **Sistema de rutas**: RouteExecution con detección de obstáculos
+6. **Variables de control**: Timing, logging, flags
+7. **Sensores IR**: Lectura, conversión a distancia, detección
+8. **Setup**: Inicialización de hardware y WiFi
+9. **Loop principal**: Ejecución de tareas no bloqueantes
+10. **Procesamiento de comandos**: Interfaz serie
+11. **Giros automáticos**: Sistema basado en encoders
+12. **Servidor WiFi**: Dashboard y API HTTP
 
 ## 📝 Notas de Desarrollo
 
@@ -317,8 +238,8 @@ El código está organizado en secciones claras:
 ### Mejoras Futuras Sugeridas:
 - Implementar cache de respuestas HTTP estáticas
 - Optimizar construcción de JSON (usar char[] en lugar de String)
-- Agregar verificación de obstáculos durante evasión
-- Implementar cancelación de evasión si obstáculo desaparece
+- Agregar sonido/buzzer para alertas de obstáculo
+- Implementar logs persistentes de rutas completadas
 
 ## 📚 Documentación Adicional
 
@@ -358,6 +279,6 @@ Las mejoras y sugerencias son bienvenidas. Por favor, documenta cualquier cambio
 
 ---
 
-**Versión**: 1.0  
-**Última actualización**: 2024  
+**Versión**: 1.1  
+**Última actualización**: Noviembre 2025  
 **Plataforma**: Arduino Uno / UNO R4 WiFi
