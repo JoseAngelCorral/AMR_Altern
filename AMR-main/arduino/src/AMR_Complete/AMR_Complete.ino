@@ -467,12 +467,19 @@ const char routesPageHTML[] PROGMEM = R"rawliteral(
                 if (!r.ok) throw new Error('Status HTTP '+r.status);
                 const j = await r.json();
                 
-                // Check for obstacle pause - change background to red
-                if (j.obstaclePaused) {
+                // Check for obstacle states
+                if (j.obstaclePaused && !j.obstacleClearing) {
+                    // Obstacle detected, waiting for it to be removed - RED
                     document.body.style.background = '#8B0000';
-                    const secs = Math.ceil((j.obstacleRemainingMs || 0) / 1000);
-                    statusPre.textContent = `⚠️ OBSTÁCULO DETECTADO - Esperando ${secs}s para reanudar...`;
+                    statusPre.textContent = `🛑 OBSTÁCULO DETECTADO - Retire el obstáculo para continuar`;
                     statusPre.style.background = '#ff0000';
+                    statusPre.style.color = '#fff';
+                } else if (j.obstacleClearing) {
+                    // Path is clear, counting down - show countdown, screen back to normal
+                    document.body.style.background = '#0b0b0b';
+                    const secs = Math.ceil((j.obstacleRemainingMs || 0) / 1000);
+                    statusPre.textContent = `✅ Camino libre - Reanudando en ${secs}s...`;
+                    statusPre.style.background = '#006400';
                     statusPre.style.color = '#fff';
                 } else {
                     document.body.style.background = '#0b0b0b';
@@ -796,9 +803,10 @@ struct RouteExecution {
     bool waitingForReturnConfirm = false; // waiting confirmation after finishing ida
     bool returnModeActive = false; // true when executing return leg
     bool postFinishTurn = false; // indicates we've started the final 180° turn
-    // Obstacle pause state (simple: stop, wait 10s, resume)
-    bool obstaclePaused = false; // true when obstacle detected and waiting
-    unsigned long obstaclePauseStart = 0; // timestamp when pause started
+    // Obstacle pause state (stop until clear, then wait 10s, resume)
+    bool obstaclePaused = false; // true when obstacle detected (waiting for clear)
+    bool obstacleClearing = false; // true when path is clear, counting down 10s
+    unsigned long obstacleClearStart = 0; // timestamp when path became clear
     // movement bookkeeping
     long moveStartLeft = 0;
     long moveStartRight = 0;
@@ -925,31 +933,54 @@ bool executeTurn() {
 bool executeMove() {
     if (!routeExec.isMoving) return true;
     
-    const unsigned long OBSTACLE_PAUSE_MS = 10000; // 10 segundos de espera
+    const unsigned long OBSTACLE_CLEAR_DELAY_MS = 10000; // 10 segundos después de despejarse
     
-    // Si está en pausa por obstáculo, verificar si pasaron los 10 segundos
-    if (routeExec.obstaclePaused) {
-        unsigned long elapsed = millis() - routeExec.obstaclePauseStart;
-        if (elapsed >= OBSTACLE_PAUSE_MS) {
-            // Tiempo de espera completado, reanudar
-            routeExec.obstaclePaused = false;
-            Serial.println(F("Obstacle pause finished. Resuming route..."));
-            motors.moveForward();
-        }
-        return false; // Aún en pausa
-    }
-    
-    // Verificar sensores frontales para detectar obstáculo
+    // Verificar sensores frontales
     float dFL = distanciaSamples(IR_FRONT_LEFT_PIN, 3, NULL);
     float dFR = distanciaSamples(IR_FRONT_RIGHT_PIN, 3, NULL);
     float frontMin = min(dFL, dFR);
+    bool obstaclePresent = (frontMin <= OBSTACLE_THRESHOLD_CM);
     
-    // Si se detecta obstáculo, detener y esperar 10 segundos
-    if (frontMin <= OBSTACLE_THRESHOLD_CM) {
+    // Estado 1: En pausa esperando que se despeje
+    if (routeExec.obstaclePaused && !routeExec.obstacleClearing) {
+        if (obstaclePresent) {
+            // Obstáculo sigue ahí, seguir esperando
+            return false;
+        } else {
+            // ¡Obstáculo removido! Iniciar cuenta regresiva de 10 segundos
+            routeExec.obstacleClearing = true;
+            routeExec.obstacleClearStart = millis();
+            Serial.println(F("Path clear! Starting 10 second countdown..."));
+            return false;
+        }
+    }
+    
+    // Estado 2: Camino despejado, contando 10 segundos
+    if (routeExec.obstacleClearing) {
+        if (obstaclePresent) {
+            // ¡Obstáculo volvió! Regresar a estado de pausa
+            routeExec.obstacleClearing = false;
+            Serial.println(F("Obstacle returned! Waiting for clear again..."));
+            return false;
+        }
+        
+        unsigned long elapsed = millis() - routeExec.obstacleClearStart;
+        if (elapsed >= OBSTACLE_CLEAR_DELAY_MS) {
+            // ¡10 segundos completados! Reanudar ruta
+            routeExec.obstaclePaused = false;
+            routeExec.obstacleClearing = false;
+            Serial.println(F("10 second countdown complete. Resuming route..."));
+            motors.moveForward();
+        }
+        return false; // Aún en cuenta regresiva
+    }
+    
+    // Detectar nuevo obstáculo durante movimiento normal
+    if (obstaclePresent) {
         motors.stop();
         routeExec.obstaclePaused = true;
-        routeExec.obstaclePauseStart = millis();
-        Serial.print(F("OBSTACLE DETECTED! Stopping for 10 seconds. frontMin="));
+        routeExec.obstacleClearing = false;
+        Serial.print(F("OBSTACLE DETECTED! Stopping. frontMin="));
         Serial.println(frontMin);
         return false;
     }
@@ -2040,10 +2071,11 @@ void handleClient(WiFiClient client) {
         json += "\"targetX\":" + String(routeExec.targetX,3) + ",";
         json += "\"targetY\":" + String(routeExec.targetY,3) + ",";
         json += "\"obstaclePaused\":" + String(routeExec.obstaclePaused ? 1 : 0) + ",";
-        // Remaining obstacle pause time
+        json += "\"obstacleClearing\":" + String(routeExec.obstacleClearing ? 1 : 0) + ",";
+        // Remaining countdown time (only when clearing)
         unsigned long obstacleRemaining = 0;
-        if (routeExec.obstaclePaused) {
-            unsigned long elapsed = millis() - routeExec.obstaclePauseStart;
+        if (routeExec.obstacleClearing) {
+            unsigned long elapsed = millis() - routeExec.obstacleClearStart;
             if (elapsed < 10000) obstacleRemaining = 10000 - elapsed;
         }
         json += "\"obstacleRemainingMs\":" + String(obstacleRemaining) + ",";
