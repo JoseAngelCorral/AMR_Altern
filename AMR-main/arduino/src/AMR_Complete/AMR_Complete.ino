@@ -165,11 +165,12 @@ const Point route1[] = { {-10.0f,5.0f}, {0.0f,10.0f}, {10.0f,5.0f}, {0.0f,0.0f} 
 const Point route2[] = { {-10.0f,5.0f}, {0.0f,10.0f}, {10.0f,5.0f}, {0.0f,0.0f} };
 const Point route3[] = { {0.0f,0.0f}, {5.0f,0.0f}, {10.0f,5.0f} };
 const Point route4[] = { {0.0f,0.0f}, {0.0f,200.0f}, {200.0f,200.0f}};
+const Point route5[] = { {0.0f,0.0f}, {0.0f,200.0f}, {0.0f,400.0f} };
 
-const char* routeNames[] = { "Ruta A", "Ruta B","Ruta C", "Ruta D", "Ruta E" };
-const Point* routesPoints[] = { route0, route1, route2, route3, route4 };
-const int routesCounts[] = { sizeof(route0)/sizeof(route0[0]), sizeof(route1)/sizeof(route1[0]), sizeof(route2)/sizeof(route2[0]), sizeof(route3)/sizeof(route3[0]), sizeof(route4)/sizeof(route4[0]) };
-const int ROUTE_COUNT = 5;
+const char* routeNames[] = { "Ruta A", "Ruta B","Ruta C", "Ruta D", "Ruta E", "Ruta Y200-400" };
+const Point* routesPoints[] = { route0, route1, route2, route3, route4, route5 };
+const int routesCounts[] = { sizeof(route0)/sizeof(route0[0]), sizeof(route1)/sizeof(route1[0]), sizeof(route2)/sizeof(route2[0]), sizeof(route3)/sizeof(route3[0]), sizeof(route4)/sizeof(route4[0]), sizeof(route5)/sizeof(route5[0]) };
+const int ROUTE_COUNT = 6;
 
 // ----------------------
 // Routes UI page (serves the dropdown HTML)
@@ -962,16 +963,16 @@ bool executeMove() {
         Serial.print(F(" frontMin=")); Serial.print(frontMin);
         Serial.print(F(" dL=")); Serial.print(dL);
         Serial.print(F(" dR=")); Serial.println(dR);
+        
     } else if (routeExec.obstacleActive) {
         // Obstacle avoidance in progress
         if (routeExec.obstacleState == 2) {
-            // moving forward step: MUST advance minimum distance, then optionally more if sensor sees obstacle
+            // FORWARD: moving laterally to pass the obstacle
+            // MUST advance minimum distance (AVOID_STEP_CM), then check sensor
             long dl = labs(encoders.readLeft() - routeExec.obstacleMoveStartLeft);
             long dr = labs(encoders.readRight() - routeExec.obstacleMoveStartRight);
             long maxm = (dl > dr) ? dl : dr;
             
-            // Always advance at least AVOID_STEP_CM (obstacleMoveTargetPulses)
-            // After that, continue if lateral sensor still sees obstacle, stop when clear or max reached
             bool minDistanceReached = (maxm >= routeExec.obstacleMoveTargetPulses);
             bool maxDistanceReached = (maxm >= routeExec.obstacleMoveMaxPulses);
             
@@ -990,18 +991,20 @@ bool executeMove() {
                 // else: keep moving forward, obstacle still alongside
             }
             // else: keep moving, haven't reached minimum distance yet
+            
         } else if (routeExec.obstacleState == 4) {
-            // crossing forward step
+            // CROSS_FORWARD: crossing forward to return to path
             long dl = labs(encoders.readLeft() - routeExec.obstacleMoveStartLeft);
             long dr = labs(encoders.readRight() - routeExec.obstacleMoveStartRight);
             long maxm = (dl > dr) ? dl : dr;
+            
             if (maxm >= routeExec.obstacleMoveTargetPulses) {
                 motors.stop();
-                delay(30);
                 routeExec.obstacleState = 5; // DONE
                 routeExec.obstacleActive = false;
                 Serial.println(F("Obstacle avoidance finished."));
-                // recompute movement towards same waypoint
+                
+                // Recompute movement towards same waypoint
                 float dx = routeExec.targetX - odometry.getX();
                 float dy = routeExec.targetY - odometry.getY();
                 float dist = sqrtf(dx*dx + dy*dy);
@@ -1009,6 +1012,7 @@ bool executeMove() {
                 routeExec.moveTargetPulses = (long)(pulsesF + 0.5f);
                 routeExec.moveStartLeft = encoders.readLeft();
                 routeExec.moveStartRight = encoders.readRight();
+                
                 if (routeExec.moveTargetPulses <= 0) {
                     Serial.println(F("Waypoint alcanzado después de evasión. Avanzando al siguiente..."));
                     routeExec.currentPoint++;
@@ -1140,8 +1144,13 @@ void beginNextWaypoint() {
         return;
     }
     
-    routeExec.targetX = routesPoints[idx][pIndex].x;
-    routeExec.targetY = routesPoints[idx][pIndex].y;
+    // Some users expect the waypoint coordinates in (y,x) order
+    // If the map/odometry axes were swapped, interpret incoming points as (y,x)
+    float wpX = routesPoints[idx][pIndex].x;
+    float wpY = routesPoints[idx][pIndex].y;
+    // Assign swapped so targetX is actually the waypoint Y and viceversa
+    routeExec.targetX = wpY;
+    routeExec.targetY = wpX;
 
     // compute heading and angle delta
     float curX = odometry.getX();
@@ -2009,14 +2018,30 @@ void handleAutoTurn() {
                 motors.moveForward();
                 Serial.print(F("Avoidance: forward step pulses:")); Serial.println(routeExec.obstacleMoveTargetPulses);
             } else if (routeExec.obstacleState == 3) {
-                // Completed turn back toward original heading; start crossing forward step
-                routeExec.obstacleState = 4; // CROSS_FORWARD
-                float pulsesF = (AVOID_STEP_CM / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
-                routeExec.obstacleMoveTargetPulses = (long)(pulsesF + 0.5f);
-                routeExec.obstacleMoveStartLeft = encoders.readLeft();
-                routeExec.obstacleMoveStartRight = encoders.readRight();
-                motors.moveForward();
-                Serial.print(F("Avoidance: cross forward pulses:")); Serial.println(routeExec.obstacleMoveTargetPulses);
+                // Completed turn back toward original heading.
+                // If the probe (opposite lateral) sensor is clear, start the crossing forward step.
+                // If it's still seeing the obstacle, instead of waiting stationary, perform
+                // another lateral advance (another FORWARD step) to try to pass the object.
+                float probeDist = distanciaSamples(routeExec.obstacleProbePin, 3, NULL);
+                if (probeDist >= (OBSTACLE_THRESHOLD_CM + AVOID_CLEAR_MARGIN_CM)) {
+                    // probe side is clear -> start crossing forward
+                    routeExec.obstacleState = 4; // CROSS_FORWARD
+                    float pulsesF = (AVOID_STEP_CM / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
+                    routeExec.obstacleMoveTargetPulses = (long)(pulsesF + 0.5f);
+                    routeExec.obstacleMoveStartLeft = encoders.readLeft();
+                    routeExec.obstacleMoveStartRight = encoders.readRight();
+                    motors.moveForward();
+                    Serial.print(F("Avoidance: cross forward pulses:")); Serial.println(routeExec.obstacleMoveTargetPulses);
+                } else {
+                    // Still blocked: perform another lateral advance step to try to bypass
+                    routeExec.obstacleState = 2; // FORWARD (another step)
+                    float pulsesF = (AVOID_STEP_CM / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
+                    routeExec.obstacleMoveTargetPulses = (long)(pulsesF + 0.5f);
+                    routeExec.obstacleMoveStartLeft = encoders.readLeft();
+                    routeExec.obstacleMoveStartRight = encoders.readRight();
+                    motors.moveForward();
+                    Serial.print(F("Avoidance: obstacle still present after turnback; advancing another step pulses:")); Serial.println(routeExec.obstacleMoveTargetPulses);
+                }
             }
             return;
         }
