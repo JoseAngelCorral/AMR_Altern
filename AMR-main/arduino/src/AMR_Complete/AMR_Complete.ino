@@ -1052,16 +1052,92 @@ bool executeMove() {
             // else: keep moving forward
             
         } else if (routeExec.obstacleState == 4) {
-            // CROSS_FORWARD: crossing forward to return to path
+            // CROSS_FORWARD: avanzando en orientación original (herradura)
+            // 1. Avanzar ~10cm para que el lado del obstáculo entre en rango del sensor lateral
+            // 2. Continuar mientras el MISMO sensor lateral detecte presencia (lado de caja)
+            // 3. Cuando libere + margen → recalcular hacia waypoint
+            
             long dl = labs(encoders.readLeft() - routeExec.obstacleMoveStartLeft);
             long dr = labs(encoders.readRight() - routeExec.obstacleMoveStartRight);
             long maxm = (dl > dr) ? dl : dr;
             
-            if (maxm >= routeExec.obstacleMoveTargetPulses) {
+            // Calcular pulsos para 10cm de avance inicial
+            const float CROSS_INITIAL_CM = 10.0f;
+            float initialPulsesF = (CROSS_INITIAL_CM / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
+            long initialPulses = (long)(initialPulsesF + 0.5f);
+            
+            bool initialAdvanceDone = (maxm >= initialPulses);
+            bool maxDistanceReached = (maxm >= routeExec.obstacleMoveMaxPulses);
+            
+            // Check SAME lateral sensor (obstacleProbePin) for presence of obstacle side
+            float probeDist = distanciaSamples(routeExec.obstacleProbePin, 3, NULL);
+            bool lateralPresenceDetected = (probeDist < PRESENCE_THRESHOLD_CM);
+            
+            // Track if we've seen the obstacle side with lateral sensor
+            if (lateralPresenceDetected && initialAdvanceDone) {
+                routeExec.obstacleSawFrontDuringCross = true;
+                // Reset clearing mode if we detect presence again
+                if (routeExec.obstacleCrossingClearing) {
+                    routeExec.obstacleCrossingClearing = false;
+                    Serial.println(F("Cross: lateral presence again, continue passing side"));
+                }
+            }
+            
+            bool canFinish = false;
+            
+            // Logic: after initial 10cm, check if lateral sees the obstacle side
+            if (initialAdvanceDone) {
+                if (routeExec.obstacleSawFrontDuringCross && !lateralPresenceDetected) {
+                    // Saw obstacle side and now it's cleared
+                    if (!routeExec.obstacleCrossingClearing) {
+                        // Start clearing margin
+                        routeExec.obstacleCrossingClearing = true;
+                        routeExec.obstacleClearStartLeft = encoders.readLeft();
+                        routeExec.obstacleClearStartRight = encoders.readRight();
+                        Serial.print(F("Cross: lateral cleared, advancing margin. probeDist=")); 
+                        Serial.println(probeDist);
+                    } else {
+                        // Check if margin distance reached
+                        long cdl = labs(encoders.readLeft() - routeExec.obstacleClearStartLeft);
+                        long cdr = labs(encoders.readRight() - routeExec.obstacleClearStartRight);
+                        long clearDist = (cdl > cdr) ? cdl : cdr;
+                        float marginPulsesF = (AVOID_CLEAR_MARGIN_CM / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
+                        long marginPulses = (long)(marginPulsesF + 0.5f);
+                        
+                        if (clearDist >= marginPulses) {
+                            canFinish = true;
+                            Serial.println(F("Cross: margin reached, obstacle side passed"));
+                        }
+                    }
+                } else if (!routeExec.obstacleSawFrontDuringCross && !lateralPresenceDetected) {
+                    // Never saw lateral presence after initial advance - no side obstruction
+                    // Wait a bit more then finish
+                    float minCrossPulsesF = (AVOID_STEP_CM / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
+                    long minCrossPulses = (long)(minCrossPulsesF + 0.5f);
+                    if (maxm >= minCrossPulses) {
+                        canFinish = true;
+                        Serial.println(F("Cross: min distance, no lateral presence detected"));
+                    }
+                }
+                // else: lateral still detecting presence, keep advancing
+            }
+            // else: still doing initial 10cm advance
+            
+            // Safety: max distance reached
+            if (maxDistanceReached) {
+                canFinish = true;
+                Serial.println(F("Cross: max distance (safety)"));
+            }
+            
+            if (canFinish) {
                 motors.stop();
+                // Reset all flags
+                routeExec.obstacleSawFrontDuringCross = false;
+                routeExec.obstacleCrossingClearing = false;
                 routeExec.obstacleState = 5; // DONE
                 routeExec.obstacleActive = false;
-                Serial.println(F("Obstacle avoidance finished."));
+                Serial.print(F("Evasion complete. totalPulses=")); Serial.print(maxm);
+                Serial.print(F(" probeDist=")); Serial.println(probeDist);
                 
                 // Recompute movement towards same waypoint
                 float dx = routeExec.targetX - odometry.getX();
@@ -1079,12 +1155,19 @@ bool executeMove() {
                     routeExec.isMoving = false;
                     return true;
                 } else {
-                    Serial.print(F("Continuando hacia waypoint desde nueva posición: "));
-                    Serial.print(routeExec.moveTargetPulses);
-                    Serial.println(F(" pulsos"));
-                    motors.moveForward();
+                    // Recalculate heading to waypoint
+                    float desired = atan2f(dy, dx) * 180.0f / PI;
+                    float curTh = odometry.getThetaDegrees();
+                    float delta = normalizeAngle(desired - curTh);
+                    Serial.print(F("Reorientando hacia waypoint. Giro: "));
+                    Serial.print(delta, 1);
+                    Serial.println(F("°"));
+                    startAutoTurn(delta);
+                    routeExec.isTurning = true;
+                    routeExec.isMoving = false;
                 }
             }
+            // else: keep moving forward
         }
     } else {
         // Normal movement completion check (no obstacle active)
