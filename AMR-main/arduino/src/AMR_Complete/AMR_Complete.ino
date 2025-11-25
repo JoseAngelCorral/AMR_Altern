@@ -101,8 +101,6 @@ const float OBSTACLE_THRESHOLD_CM = 30.0f; // if front distance below this, cons
 const float AVOID_STEP_CM = 30.0f; // how far to advance when circumventing (per step)
 const float AVOID_CLEAR_MARGIN_CM = 8.0f; // extra margin to consider object cleared
 const float AVOID_MAX_STEP_CM = 200.0f; // maximum allowed advance during avoidance (safety)
-// When an obstacle is detected, wait this many ms before starting avoidance
-const unsigned long OBSTACLE_DETECTION_DELAY_MS = 2000; // 2 seconds
 
 // Estructura para devolver lecturas
 struct IRSensors {
@@ -762,7 +760,7 @@ Odometry odometry(&encoders);
 // Sistema de evasión de obstáculos integrado:
 // - Estados: 0=idle, 1=TURN (90°), 2=FORWARD (avance lateral), 
 //            3=TURNBACK (-90°), 4=CROSS_FORWARD (cruzar), 5=DONE
-// - Confirmación de 2 segundos antes de iniciar evasión
+// - Detección y evasión INMEDIATA (sin tiempo de espera)
 // - Selección automática del lado con más espacio libre
 struct RouteExecution {
     bool active = false;
@@ -788,8 +786,6 @@ struct RouteExecution {
     long obstacleMoveTargetPulses = 0;
     long obstacleMoveMaxPulses = 0; // safety cap if sensor never clears
     int obstacleProbePin = -1; // pin to sample for clearance (opposite sensor)
-    bool obstacleWaitActive = false; // waiting a short time to confirm obstacle isn't transient
-    unsigned long obstacleWaitStartMillis = 0;
     // movement bookkeeping
     long moveStartLeft = 0;
     long moveStartRight = 0;
@@ -921,38 +917,51 @@ bool executeMove() {
     float dFR = distanciaSamples(IR_FRONT_RIGHT_PIN, 3, NULL);
     float frontMin = min(dFL, dFR);
     
-    // Obstacle detection and avoidance logic
-    if (!routeExec.obstacleActive && !routeExec.obstacleWaitActive && frontMin <= OBSTACLE_THRESHOLD_CM) {
-        routeExec.obstacleWaitActive = true;
-        routeExec.obstacleWaitStartMillis = millis();
-        Serial.print(F("Obstacle seen briefly (waiting to confirm). frontMin=")); Serial.println(frontMin);
-    } else if (!routeExec.obstacleActive && routeExec.obstacleWaitActive) {
-        // check if wait period expired
-        if (millis() - routeExec.obstacleWaitStartMillis >= OBSTACLE_DETECTION_DELAY_MS) {
-            // re-sample front to confirm
-            float dFL2 = distanciaSamples(IR_FRONT_LEFT_PIN, 3, NULL);
-            float dFR2 = distanciaSamples(IR_FRONT_RIGHT_PIN, 3, NULL);
-            float frontMin2 = min(dFL2, dFR2);
-            routeExec.obstacleWaitActive = false;
-            if (frontMin2 <= OBSTACLE_THRESHOLD_CM) {
-                // Confirmed obstacle: trigger avoidance
-                float dL = distanciaSamples(IR_LEFT_SIDE_PIN, 3, NULL);
-                float dR = distanciaSamples(IR_RIGHT_SIDE_PIN, 3, NULL);
-                routeExec.obstacleSide = (dL > dR) ? +1 : -1;
-                routeExec.obstacleActive = true;
-                routeExec.obstacleState = 1; // TURN
-                motors.stop();
-                delay(30);
-                routeExec.obstacleProbePin = (routeExec.obstacleSide == +1) ? IR_RIGHT_SIDE_PIN : IR_LEFT_SIDE_PIN;
-                float pulsesF = (AVOID_MAX_STEP_CM / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
-                routeExec.obstacleMoveMaxPulses = (long)(pulsesF + 0.5f);
-                startAutoTurn(routeExec.obstacleSide * 90.0f);
-                Serial.print(F("Obstacle confirmed. side=")); Serial.print(routeExec.obstacleSide);
-                Serial.print(F(" frontMin=")); Serial.println(frontMin2);
-            } else {
-                Serial.print(F("Obstacle cleared during wait. frontMin=")); Serial.println(frontMin2);
-            }
+    // Obstacle detection and avoidance logic - IMMEDIATE (no waiting period)
+    if (!routeExec.obstacleActive && frontMin <= OBSTACLE_THRESHOLD_CM) {
+        // Obstacle detected: trigger avoidance immediately
+        motors.stop();
+        
+        // Read lateral sensors to decide which side to evade
+        float dL = distanciaSamples(IR_LEFT_SIDE_PIN, 3, NULL);
+        float dR = distanciaSamples(IR_RIGHT_SIDE_PIN, 3, NULL);
+        
+        // Decide side according to rule:
+        // - If both lateral sensors are free (no proximity), prefer RIGHT.
+        // - If left lateral detects proximity, avoid on the RIGHT (opposite side).
+        // - If right lateral detects proximity, avoid on the LEFT (opposite side).
+        // - If both lateral detect proximity, fallback to side with more space.
+        const float lateralOccupiedCm = OBSTACLE_THRESHOLD_CM;
+        bool leftOccupied = dL <= lateralOccupiedCm;
+        bool rightOccupied = dR <= lateralOccupiedCm;
+        
+        if (!leftOccupied && !rightOccupied) {
+            // both free -> prefer right-hand avoidance
+            routeExec.obstacleSide = -1; // -1 = right
+        } else if (leftOccupied && !rightOccupied) {
+            // left is occupied -> go right (opposite)
+            routeExec.obstacleSide = -1;
+        } else if (rightOccupied && !leftOccupied) {
+            // right is occupied -> go left (opposite)
+            routeExec.obstacleSide = +1;
+        } else {
+            // both occupied -> fallback to side with more space
+            routeExec.obstacleSide = (dL > dR) ? +1 : -1;
         }
+        
+        routeExec.obstacleActive = true;
+        routeExec.obstacleState = 1; // TURN
+        
+        // Probe pin: check the opposite lateral sensor while advancing (detect when object is cleared)
+        routeExec.obstacleProbePin = (routeExec.obstacleSide == +1) ? IR_RIGHT_SIDE_PIN : IR_LEFT_SIDE_PIN;
+        float pulsesF = (AVOID_MAX_STEP_CM / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
+        routeExec.obstacleMoveMaxPulses = (long)(pulsesF + 0.5f);
+        
+        startAutoTurn(routeExec.obstacleSide * 90.0f);
+        Serial.print(F("Obstacle detected! Immediate evasion. side=")); Serial.print(routeExec.obstacleSide);
+        Serial.print(F(" frontMin=")); Serial.print(frontMin);
+        Serial.print(F(" dL=")); Serial.print(dL);
+        Serial.print(F(" dR=")); Serial.println(dR);
     } else if (routeExec.obstacleActive) {
         // Obstacle avoidance in progress
         if (routeExec.obstacleState == 2) {
@@ -1948,6 +1957,7 @@ void handleAutoTurn() {
         motors.stop();
         turningInProgress = false;
         Serial.println(F("OK"));
+        
         // If this was a post-finish 180° turn, handle waiting/finishing logic
         if (routeExec.postFinishTurn) {
             routeExec.postFinishTurn = false;
@@ -1970,8 +1980,6 @@ void handleAutoTurn() {
             }
         }
 
-        return;
-    }
         // If an obstacle avoidance sequence was waiting for this turn to finish,
         // advance the obstacle state machine: after the initial TURN we should
         // start the forward step; after the TURNBACK we should start the crossing step.
@@ -1998,6 +2006,9 @@ void handleAutoTurn() {
             }
             return;
         }
+
+        return;
+    }
 
     // Verificar timeout
     if (millis() - turnStartTime > MAX_TURN_TIME) {
