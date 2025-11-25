@@ -965,17 +965,31 @@ bool executeMove() {
     } else if (routeExec.obstacleActive) {
         // Obstacle avoidance in progress
         if (routeExec.obstacleState == 2) {
-            // moving forward step: sensor-driven completion
-            float probeDist = distanciaSamples(routeExec.obstacleProbePin, 3, NULL);
+            // moving forward step: MUST advance minimum distance, then optionally more if sensor sees obstacle
             long dl = labs(encoders.readLeft() - routeExec.obstacleMoveStartLeft);
             long dr = labs(encoders.readRight() - routeExec.obstacleMoveStartRight);
             long maxm = (dl > dr) ? dl : dr;
-            if (probeDist >= (OBSTACLE_THRESHOLD_CM + AVOID_CLEAR_MARGIN_CM) || maxm >= routeExec.obstacleMoveMaxPulses) {
-                motors.stop();
-                delay(30);
-                routeExec.obstacleState = 3; // TURNBACK
-                startAutoTurn(-routeExec.obstacleSide * 90.0f);
+            
+            // Always advance at least AVOID_STEP_CM (obstacleMoveTargetPulses)
+            // After that, continue if lateral sensor still sees obstacle, stop when clear or max reached
+            bool minDistanceReached = (maxm >= routeExec.obstacleMoveTargetPulses);
+            bool maxDistanceReached = (maxm >= routeExec.obstacleMoveMaxPulses);
+            
+            if (minDistanceReached) {
+                // Check lateral sensor to see if we passed the obstacle
+                float probeDist = distanciaSamples(routeExec.obstacleProbePin, 3, NULL);
+                bool obstacleCleared = (probeDist >= (OBSTACLE_THRESHOLD_CM + AVOID_CLEAR_MARGIN_CM));
+                
+                if (obstacleCleared || maxDistanceReached) {
+                    motors.stop();
+                    Serial.print(F("Avoidance forward done. pulses=")); Serial.print(maxm);
+                    Serial.print(F(" probeDist=")); Serial.println(probeDist);
+                    routeExec.obstacleState = 3; // TURNBACK
+                    startAutoTurn(-routeExec.obstacleSide * 90.0f);
+                }
+                // else: keep moving forward, obstacle still alongside
             }
+            // else: keep moving, haven't reached minimum distance yet
         } else if (routeExec.obstacleState == 4) {
             // crossing forward step
             long dl = labs(encoders.readLeft() - routeExec.obstacleMoveStartLeft);
