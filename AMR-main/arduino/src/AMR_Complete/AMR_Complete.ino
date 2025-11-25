@@ -787,6 +787,7 @@ struct RouteExecution {
     long obstacleMoveTargetPulses = 0;
     long obstacleMoveMaxPulses = 0; // safety cap if sensor never clears
     int obstacleProbePin = -1; // pin to sample for clearance (opposite sensor)
+    bool obstacleSawDuringAdvance = false; // true if lateral sensor saw obstacle during FORWARD state
     // movement bookkeeping
     long moveStartLeft = 0;
     long moveStartRight = 0;
@@ -952,6 +953,7 @@ bool executeMove() {
         
         routeExec.obstacleActive = true;
         routeExec.obstacleState = 1; // TURN
+        routeExec.obstacleSawDuringAdvance = false; // reset for new avoidance
         
         // Probe pin: check the opposite lateral sensor while advancing (detect when object is cleared)
         routeExec.obstacleProbePin = (routeExec.obstacleSide == +1) ? IR_RIGHT_SIDE_PIN : IR_LEFT_SIDE_PIN;
@@ -968,7 +970,9 @@ bool executeMove() {
         // Obstacle avoidance in progress
         if (routeExec.obstacleState == 2) {
             // FORWARD: moving laterally to pass the obstacle
-            // MUST advance minimum distance (AVOID_STEP_CM), then check sensor
+            // Strategy: Always advance AVOID_STEP_CM, then check if sensor SEES obstacle.
+            // If sensor sees obstacle, keep advancing until it clears.
+            // If sensor never sees obstacle, advance the minimum and proceed.
             long dl = labs(encoders.readLeft() - routeExec.obstacleMoveStartLeft);
             long dr = labs(encoders.readRight() - routeExec.obstacleMoveStartRight);
             long maxm = (dl > dr) ? dl : dr;
@@ -976,21 +980,41 @@ bool executeMove() {
             bool minDistanceReached = (maxm >= routeExec.obstacleMoveTargetPulses);
             bool maxDistanceReached = (maxm >= routeExec.obstacleMoveMaxPulses);
             
-            if (minDistanceReached) {
-                // Check lateral sensor to see if we passed the obstacle
-                float probeDist = distanciaSamples(routeExec.obstacleProbePin, 3, NULL);
-                bool obstacleCleared = (probeDist >= (OBSTACLE_THRESHOLD_CM + AVOID_CLEAR_MARGIN_CM));
-                
-                if (obstacleCleared || maxDistanceReached) {
-                    motors.stop();
-                    Serial.print(F("Avoidance forward done. pulses=")); Serial.print(maxm);
-                    Serial.print(F(" probeDist=")); Serial.println(probeDist);
-                    routeExec.obstacleState = 3; // TURNBACK
-                    startAutoTurn(-routeExec.obstacleSide * 90.0f);
-                }
-                // else: keep moving forward, obstacle still alongside
+            // Check lateral sensor
+            float probeDist = distanciaSamples(routeExec.obstacleProbePin, 3, NULL);
+            bool sensorSeesObstacle = (probeDist < OBSTACLE_THRESHOLD_CM);
+            bool sensorClear = (probeDist >= (OBSTACLE_THRESHOLD_CM + AVOID_CLEAR_MARGIN_CM));
+            
+            // Track if we've ever seen the obstacle with the lateral sensor
+            if (sensorSeesObstacle) {
+                routeExec.obstacleSawDuringAdvance = true;
             }
-            // else: keep moving, haven't reached minimum distance yet
+            
+            // Decision logic:
+            // - If we saw the obstacle and now it's clear: done (passed the obstacle)
+            // - If we never saw the obstacle but reached min distance: done (obstacle not visible to lateral)
+            // - If max distance reached: done (safety limit)
+            bool canFinish = false;
+            if (routeExec.obstacleSawDuringAdvance && sensorClear) {
+                canFinish = true;
+                Serial.println(F("Avoidance: obstacle seen and now cleared"));
+            } else if (!routeExec.obstacleSawDuringAdvance && minDistanceReached) {
+                canFinish = true;
+                Serial.println(F("Avoidance: min distance reached, obstacle not visible to lateral sensor"));
+            } else if (maxDistanceReached) {
+                canFinish = true;
+                Serial.println(F("Avoidance: max distance reached (safety)"));
+            }
+            
+            if (canFinish) {
+                motors.stop();
+                routeExec.obstacleSawDuringAdvance = false; // reset for next avoidance
+                Serial.print(F("Avoidance forward done. pulses=")); Serial.print(maxm);
+                Serial.print(F(" probeDist=")); Serial.println(probeDist);
+                routeExec.obstacleState = 3; // TURNBACK
+                startAutoTurn(-routeExec.obstacleSide * 90.0f);
+            }
+            // else: keep moving forward
             
         } else if (routeExec.obstacleState == 4) {
             // CROSS_FORWARD: crossing forward to return to path
