@@ -99,9 +99,8 @@ int IR_THRESHOLD = 150;            // umbral por defecto (0-255). Ajustar por ca
 // Obstacle avoidance parameters
 const float OBSTACLE_THRESHOLD_CM = 30.0f; // if front distance below this, consider obstacle
 const float AVOID_STEP_CM = 30.0f; // how far to advance when circumventing (per step)
-const float AVOID_CLEAR_MARGIN_CM = 20.0f; // margin to advance after obstacle stops being detected (cm)
+const float AVOID_CLEAR_MARGIN_CM = 15.0f; // extra margin to consider object cleared (30+15=45cm threshold)
 const float AVOID_MAX_STEP_CM = 200.0f; // maximum allowed advance during avoidance (safety)
-const float PRESENCE_THRESHOLD_CM = 50.0f; // if sensor reads below this, consider "presence detected"
 
 // Estructura para devolver lecturas
 struct IRSensors {
@@ -789,9 +788,6 @@ struct RouteExecution {
     long obstacleMoveMaxPulses = 0; // safety cap if sensor never clears
     int obstacleProbePin = -1; // pin to sample for clearance (opposite sensor)
     bool obstacleSawDuringAdvance = false; // true if lateral sensor saw obstacle during FORWARD state
-    bool obstacleClearing = false; // true when sensor stopped detecting, advancing margin
-    long obstacleClearStartLeft = 0; // encoder position when clearing started
-    long obstacleClearStartRight = 0;
     // movement bookkeeping
     long moveStartLeft = 0;
     long moveStartRight = 0;
@@ -958,10 +954,9 @@ bool executeMove() {
         routeExec.obstacleActive = true;
         routeExec.obstacleState = 1; // TURN
         routeExec.obstacleSawDuringAdvance = false; // reset for new avoidance
-        routeExec.obstacleClearing = false; // reset clearing mode
         
-        // Si gira a la derecha (side=-1), verifica el sensor izquierdo; si gira a la izquierda (side=+1), verifica el derecho.
-        routeExec.obstacleProbePin = (routeExec.obstacleSide == -1) ? IR_LEFT_SIDE_PIN : IR_RIGHT_SIDE_PIN;
+        // Probe pin: check the opposite lateral sensor while advancing (detect when object is cleared)
+        routeExec.obstacleProbePin = (routeExec.obstacleSide == +1) ? IR_RIGHT_SIDE_PIN : IR_LEFT_SIDE_PIN;
         float pulsesF = (AVOID_MAX_STEP_CM / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
         routeExec.obstacleMoveMaxPulses = (long)(pulsesF + 0.5f);
         
@@ -975,11 +970,9 @@ bool executeMove() {
         // Obstacle avoidance in progress
         if (routeExec.obstacleState == 2) {
             // FORWARD: moving laterally to pass the obstacle
-            // PRESENCE-BASED LOGIC:
-            // - While sensor detects presence (something close) → keep advancing
-            // - When sensor stops detecting → advance a margin to ensure clearance
-            // - After margin → TURNBACK
-            
+            // Strategy: Always advance AVOID_STEP_CM, then check if sensor SEES obstacle.
+            // If sensor sees obstacle, keep advancing until it clears.
+            // If sensor never sees obstacle, advance the minimum and proceed.
             long dl = labs(encoders.readLeft() - routeExec.obstacleMoveStartLeft);
             long dr = labs(encoders.readRight() - routeExec.obstacleMoveStartRight);
             long maxm = (dl > dr) ? dl : dr;
@@ -987,64 +980,36 @@ bool executeMove() {
             bool minDistanceReached = (maxm >= routeExec.obstacleMoveTargetPulses);
             bool maxDistanceReached = (maxm >= routeExec.obstacleMoveMaxPulses);
             
-            // Check lateral sensor for PRESENCE (something detected = low reading)
+            // Check lateral sensor
             float probeDist = distanciaSamples(routeExec.obstacleProbePin, 3, NULL);
-            bool presenceDetected = (probeDist < PRESENCE_THRESHOLD_CM);
+            bool sensorSeesObstacle = (probeDist < OBSTACLE_THRESHOLD_CM);
+            bool sensorClear = (probeDist >= (OBSTACLE_THRESHOLD_CM + AVOID_CLEAR_MARGIN_CM));
             
-            // Track if we've ever seen presence with the lateral sensor
-            if (presenceDetected) {
+            // Track if we've ever seen the obstacle with the lateral sensor
+            if (sensorSeesObstacle) {
                 routeExec.obstacleSawDuringAdvance = true;
-                // Reset clearing mode if we detect presence again
-                if (routeExec.obstacleClearing) {
-                    routeExec.obstacleClearing = false;
-                    Serial.println(F("Avoidance: presence detected again, continue rounding"));
-                }
             }
             
+            // Decision logic:
+            // - If we saw the obstacle and now it's clear: done (passed the obstacle)
+            // - If we never saw the obstacle but reached min distance: done (obstacle not visible to lateral)
+            // - If max distance reached: done (safety limit)
             bool canFinish = false;
-            
-            // If we saw presence and now it's gone → start/continue clearing margin
-            if (routeExec.obstacleSawDuringAdvance && !presenceDetected) {
-                if (!routeExec.obstacleClearing) {
-                    // Start clearing margin
-                    routeExec.obstacleClearing = true;
-                    routeExec.obstacleClearStartLeft = encoders.readLeft();
-                    routeExec.obstacleClearStartRight = encoders.readRight();
-                    Serial.print(F("Avoidance: presence cleared, advancing margin. probeDist=")); 
-                    Serial.println(probeDist);
-                } else {
-                    // Check if margin distance reached
-                    long cdl = labs(encoders.readLeft() - routeExec.obstacleClearStartLeft);
-                    long cdr = labs(encoders.readRight() - routeExec.obstacleClearStartRight);
-                    long clearDist = (cdl > cdr) ? cdl : cdr;
-                    float marginPulsesF = (AVOID_CLEAR_MARGIN_CM / (float)WHEEL_CIRCUMFERENCE_CM) * (float)encoders.getPulsesPerRevolution();
-                    long marginPulses = (long)(marginPulsesF + 0.5f);
-                    
-                    if (clearDist >= marginPulses) {
-                        canFinish = true;
-                        Serial.println(F("Avoidance: margin reached, obstacle passed"));
-                    }
-                }
-            }
-            
-            // If we never saw presence but reached minimum → proceed (obstacle not visible to sensor)
-            if (!routeExec.obstacleSawDuringAdvance && minDistanceReached) {
+            if (routeExec.obstacleSawDuringAdvance && sensorClear) {
                 canFinish = true;
-                Serial.println(F("Avoidance: min distance, no presence detected by lateral"));
-            }
-            
-            // Safety: max distance reached
-            if (maxDistanceReached) {
+                Serial.println(F("Avoidance: obstacle seen and now cleared"));
+            } else if (!routeExec.obstacleSawDuringAdvance && minDistanceReached) {
                 canFinish = true;
-                Serial.println(F("Avoidance: max distance (safety)"));
+                Serial.println(F("Avoidance: min distance reached, obstacle not visible to lateral sensor"));
+            } else if (maxDistanceReached) {
+                canFinish = true;
+                Serial.println(F("Avoidance: max distance reached (safety)"));
             }
             
             if (canFinish) {
                 motors.stop();
-                // Reset flags
-                routeExec.obstacleSawDuringAdvance = false;
-                routeExec.obstacleClearing = false;
-                Serial.print(F("Avoidance forward done. totalPulses=")); Serial.print(maxm);
+                routeExec.obstacleSawDuringAdvance = false; // reset for next avoidance
+                Serial.print(F("Avoidance forward done. pulses=")); Serial.print(maxm);
                 Serial.print(F(" probeDist=")); Serial.println(probeDist);
                 routeExec.obstacleState = 3; // TURNBACK
                 startAutoTurn(-routeExec.obstacleSide * 90.0f);
